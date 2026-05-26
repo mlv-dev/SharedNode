@@ -12,6 +12,10 @@
 #if !(MESHTASTIC_EXCLUDE_PKI || MESHTASTIC_EXCLUDE_PKI_KEYGEN)
 #include "mesh/CryptoEngine.h"
 #endif
+#include "meshUtils.h"
+#if !MESHTASTIC_EXCLUDE_PKI
+#include <Curve25519.h>
+#endif
 #include "mesh/NodeDB.h"
 
 #include <cstring>
@@ -125,6 +129,19 @@ uint32_t PairingPolicy::virtualNodeIdForSlot(uint8_t slotIndex) const
     return (slotIndex < records.size() && records[slotIndex].hasIdentity()) ? records[slotIndex].virtualNodeId : 0;
 }
 
+uint8_t PairingPolicy::slotForVirtualNodeId(uint32_t virtualNodeId) const
+{
+    concurrency::LockGuard guard(&policyLock);
+    const_cast<PairingPolicy *>(this)->loadFromNodeDBLocked();
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    return slot >= 0 ? static_cast<uint8_t>(slot) : SharedNode::INVALID_SLOT;
+}
+
+PairingPolicy::Role PairingPolicy::roleForVirtualNodeId(uint32_t virtualNodeId) const
+{
+    return roleForSlot(slotForVirtualNodeId(virtualNodeId));
+}
+
 bool PairingPolicy::setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualNodeId)
 {
     // Virtual node ID 0 has special packet semantics, so guest IDs start at a
@@ -148,6 +165,138 @@ bool PairingPolicy::setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualN
     }
     persistToNodeDBLocked();
     return true;
+}
+
+bool PairingPolicy::buildVirtualUser(uint32_t virtualNodeId, meshtastic_User &user) const
+{
+    concurrency::LockGuard guard(&policyLock);
+    const_cast<PairingPolicy *>(this)->loadFromNodeDBLocked();
+
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (slot < 0) {
+        return false;
+    }
+
+    const ClientRecord &record = records[slot];
+    memset(&user, 0, sizeof(user));
+    snprintf(user.id, sizeof(user.id), "!%08x", virtualNodeId);
+    strncpy(user.short_name, record.shortName, sizeof(user.short_name) - 1);
+    strncpy(user.long_name, record.longName, sizeof(user.long_name) - 1);
+    user.public_key.size = PKI_KEY_SIZE;
+    memcpy(user.public_key.bytes, record.publicKey, PKI_KEY_SIZE);
+    return true;
+}
+
+bool PairingPolicy::buildVirtualSecurityConfig(uint32_t virtualNodeId, meshtastic_Config_SecurityConfig &security,
+                                               bool includeAdminKeys) const
+{
+    concurrency::LockGuard guard(&policyLock);
+    const_cast<PairingPolicy *>(this)->loadFromNodeDBLocked();
+
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (slot < 0) {
+        return false;
+    }
+
+    const ClientRecord &record = records[slot];
+    security = config.security;
+    security.public_key.size = PKI_KEY_SIZE;
+    memcpy(security.public_key.bytes, record.publicKey, PKI_KEY_SIZE);
+    security.private_key.size = PKI_KEY_SIZE;
+    memcpy(security.private_key.bytes, record.privateKey, PKI_KEY_SIZE);
+    if (!includeAdminKeys) {
+        security.admin_key_count = 0;
+        memset(security.admin_key, 0, sizeof(security.admin_key));
+    }
+    return true;
+}
+
+bool PairingPolicy::updateVirtualClientNames(uint32_t virtualNodeId, const char *shortName, const char *longName)
+{
+    concurrency::LockGuard guard(&policyLock);
+    loadFromNodeDBLocked();
+
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (slot < 0) {
+        return false;
+    }
+
+    ClientRecord &record = records[slot];
+    bool changed = false;
+    if (shortName && *shortName && strncmp(record.shortName, shortName, sizeof(record.shortName)) != 0) {
+        memset(record.shortName, 0, sizeof(record.shortName));
+        strncpy(record.shortName, shortName, sizeof(record.shortName) - 1);
+        changed = true;
+    }
+    if (longName && *longName && strncmp(record.longName, longName, sizeof(record.longName)) != 0) {
+        memset(record.longName, 0, sizeof(record.longName));
+        strncpy(record.longName, longName, sizeof(record.longName) - 1);
+        changed = true;
+    }
+
+    if (changed) {
+        persistToNodeDBLocked();
+    }
+    return true;
+}
+
+bool PairingPolicy::regenerateVirtualClientKeys(uint32_t virtualNodeId)
+{
+    concurrency::LockGuard guard(&policyLock);
+    loadFromNodeDBLocked();
+
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (slot < 0) {
+        return false;
+    }
+
+    uint8_t publicKey[PKI_KEY_SIZE] = {};
+    uint8_t privateKey[PKI_KEY_SIZE] = {};
+    if (!generateVirtualClientKeysLocked(publicKey, privateKey)) {
+        return false;
+    }
+
+    ClientRecord &record = records[slot];
+    memcpy(record.publicKey, publicKey, sizeof(record.publicKey));
+    memcpy(record.privateKey, privateKey, sizeof(record.privateKey));
+    persistToNodeDBLocked();
+    return true;
+}
+
+bool PairingPolicy::updateVirtualClientKeys(uint32_t virtualNodeId, const meshtastic_Config_SecurityConfig &security)
+{
+    if (security.private_key.size != PKI_KEY_SIZE || memfll(security.private_key.bytes, 0, PKI_KEY_SIZE)) {
+        return regenerateVirtualClientKeys(virtualNodeId);
+    }
+
+#if !MESHTASTIC_EXCLUDE_PKI
+    uint8_t privateKey[PKI_KEY_SIZE] = {};
+    uint8_t publicKey[PKI_KEY_SIZE] = {};
+    memcpy(privateKey, security.private_key.bytes, PKI_KEY_SIZE);
+    Curve25519::eval(publicKey, privateKey, 0);
+    if (Curve25519::isWeakPoint(publicKey)) {
+        LOG_ERROR("Shared-node virtual client key import produced a weak public key");
+        return false;
+    }
+
+    concurrency::LockGuard guard(&policyLock);
+    loadFromNodeDBLocked();
+
+    const int8_t slot = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (slot < 0) {
+        return false;
+    }
+
+    ClientRecord &record = records[slot];
+    memcpy(record.publicKey, publicKey, sizeof(record.publicKey));
+    memcpy(record.privateKey, privateKey, sizeof(record.privateKey));
+    persistToNodeDBLocked();
+    return true;
+#else
+    (void)virtualNodeId;
+    (void)security;
+    return false;
+#endif
 }
 
 Role PairingPolicy::resolveRoleForConnection(uint16_t connHandle, const PeerIdentity &identity)
@@ -356,6 +505,17 @@ int8_t PairingPolicy::findSlotByIdentityLocked(const PeerIdentity &identity) con
 
     return recordSlots.findIndex(
         [&identity](const ClientRecord &record) { return record.hasIdentity() && record.peerIdentity == identity; });
+}
+
+int8_t PairingPolicy::findSlotByVirtualNodeIdLocked(uint32_t virtualNodeId) const
+{
+    if (virtualNodeId == 0) {
+        return -1;
+    }
+
+    return recordSlots.findIndex([virtualNodeId](const ClientRecord &record) {
+        return record.hasIdentity() && record.virtualNodeId == virtualNodeId;
+    });
 }
 
 int8_t PairingPolicy::findAvailableGuestSlotLocked() const

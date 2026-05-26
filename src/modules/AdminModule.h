@@ -3,6 +3,9 @@
 #include <esp_ota_ops.h>
 #endif
 #include "ProtobufModule.h"
+#ifdef MODE_SHARED_NODE
+#include "mesh/sharedNode/Types.h"
+#endif
 #include <sys/types.h>
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
@@ -36,6 +39,14 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     virtual bool handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshtastic_AdminMessage *p) override;
 
   private:
+#ifdef MODE_SHARED_NODE
+    struct SharedNodeAdminContext {
+        bool isLocalVirtual = false;
+        SharedNode::Role role = SharedNode::Role::UNKNOWN;
+        NodeNum virtualNodeId = 0;
+    };
+#endif
+
     bool hasOpenEditTransaction = false;
 
     uint8_t session_passkey[8] = {0};
@@ -55,6 +66,10 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     void handleGetDeviceConnectionStatus(const meshtastic_MeshPacket &req);
     void handleGetNodeRemoteHardwarePins(const meshtastic_MeshPacket &req);
     void handleGetDeviceUIConfig(const meshtastic_MeshPacket &req);
+#ifdef MODE_SHARED_NODE
+    void handleGetVirtualOwner(const meshtastic_MeshPacket &req, NodeNum virtualNodeId);
+    void handleGetVirtualSecurityConfig(const meshtastic_MeshPacket &req, NodeNum virtualNodeId, bool includeAdminKeys);
+#endif
     /**
      * Setters
      */
@@ -71,6 +86,13 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     void handleStoreDeviceUIConfig(const meshtastic_DeviceUIConfig &uicfg);
     void handleSendInputEvent(const meshtastic_AdminMessage_InputEvent &inputEvent);
     void reboot(int32_t seconds);
+
+#ifdef MODE_SHARED_NODE
+    SharedNodeAdminContext getSharedNodeAdminContext(const meshtastic_MeshPacket &mp) const;
+    bool sharedNodeAdminMessageAllowed(const SharedNodeAdminContext &context, const meshtastic_AdminMessage *request) const;
+    bool handleSetVirtualOwner(NodeNum virtualNodeId, const meshtastic_User &owner);
+    bool handleSetVirtualSecurityConfig(const SharedNodeAdminContext &context, const meshtastic_Config &config);
+#endif
 
     void setPassKey(meshtastic_AdminMessage *res);
     bool checkPassKey(meshtastic_AdminMessage *res);

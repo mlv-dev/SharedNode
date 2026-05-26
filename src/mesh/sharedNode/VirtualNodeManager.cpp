@@ -135,19 +135,40 @@ VirtualNodeManager::OutgoingPacketDecision VirtualNodeManager::handleOutgoingPac
         return OUTGOING_REJECT;
     }
 
+    const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
     const bool isAdminPacket = packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
                                packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP;
-    const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
     SessionInfo *localSession = nullptr;
-    if (!isBroadcast(packet.to) && packet.to != 0) {
+    if (!isBroadcast(packet.to) && packet.to != 0 && packet.to != localNodeNum) {
         localSession = findSessionByVirtualNodeLocked(packet.to);
     }
-    const bool targetsLocalNode = packet.to == 0 || isBroadcast(packet.to) || packet.to == localNodeNum || localSession != nullptr;
+    const bool targetsPhysicalLocalNode = packet.to == 0 || packet.to == localNodeNum;
+    const bool targetsLocalVirtualNode = localSession != nullptr;
 
-    const bool sourceIsAdmin = SharedNode::roleForSlot(session->sharedNodeSlot) == SharedNode::Role::ADMIN;
-    if (isAdminPacket && !sourceIsAdmin && targetsLocalNode) {
-        // Guests can send normal mesh traffic, but local admin commands would
-        // control the host node or another local guest. Keep that admin-only.
+    const SharedNode::Role sourceRole = SharedNode::roleForSlot(session->sharedNodeSlot);
+    const bool sourceIsAdmin = sourceRole == SharedNode::Role::ADMIN;
+    const bool sourceUsesVirtualIdentity = session->virtualNodeId != 0 && session->virtualNodeId != localNodeNum;
+
+    if (isAdminPacket && sourceUsesVirtualIdentity) {
+        const bool targetsOwnVirtualNode = packet.to == session->virtualNodeId;
+        if (isBroadcast(packet.to) || !(targetsPhysicalLocalNode || targetsOwnVirtualNode)) {
+            return OUTGOING_REJECT;
+        }
+
+        // Virtual clients may use ADMIN_APP only as a local control path.
+        // AdminModule will scope owner/key operations to packet.from.
+        packet.to = localNodeNum;
+        packet.from = session->virtualNodeId;
+        packet.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_API;
+        packet.next_hop = NO_NEXT_HOP_PREFERENCE;
+        packet.relay_node = NO_RELAY_NODE;
+        return OUTGOING_ALLOW_RADIO;
+    }
+
+    if (isAdminPacket && !sourceIsAdmin &&
+        (isBroadcast(packet.to) || targetsPhysicalLocalNode || targetsLocalVirtualNode)) {
+        // Guests can send normal mesh traffic, but admin commands are either
+        // handled by the scoped virtual path above or rejected.
         return OUTGOING_REJECT;
     }
 
@@ -167,9 +188,9 @@ VirtualNodeManager::OutgoingPacketDecision VirtualNodeManager::handleOutgoingPac
         }
     }
 
-    if (!sourceIsAdmin) {
-        // Radio-bound guest packets must appear to come from the guest virtual
-        // node, never from the physical shared node.
+    if (sourceUsesVirtualIdentity) {
+        // Radio-bound virtual client packets must appear to come from the
+        // virtual node, never from the physical shared node.
         packet.from = session->virtualNodeId;
     }
 
@@ -184,9 +205,9 @@ void VirtualNodeManager::handleIncomingPacket(meshtastic_MeshPacket &packet)
 
     concurrency::LockGuard guard(&sessionLock);
     const NodeNum localNodeNum = nodeDB->getNodeNum();
-    (void)localNodeNum;
     for (SessionInfo &session : sessions) {
-        if (!session.used || SharedNode::roleForSlot(session.sharedNodeSlot) == SharedNode::Role::ADMIN || !session.api) {
+        const bool sessionUsesVirtualIdentity = session.virtualNodeId != 0 && session.virtualNodeId != localNodeNum;
+        if (!session.used || !session.api || !sessionUsesVirtualIdentity) {
             continue;
         }
 
@@ -241,8 +262,29 @@ bool VirtualNodeManager::isLocalVirtualNode(NodeNum nodeNum) const
         return false;
     }
 
+    const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+    if (nodeNum == localNodeNum) {
+        return false;
+    }
+
     concurrency::LockGuard guard(&sessionLock);
     return findSessionByVirtualNodeLocked(nodeNum) != nullptr;
+}
+
+uint8_t VirtualNodeManager::sharedNodeSlotForVirtualNode(NodeNum nodeNum) const
+{
+    if (nodeNum == 0) {
+        return SharedNode::INVALID_SLOT;
+    }
+
+    const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+    if (nodeNum == localNodeNum) {
+        return SharedNode::INVALID_SLOT;
+    }
+
+    concurrency::LockGuard guard(&sessionLock);
+    const SessionInfo *session = findSessionByVirtualNodeLocked(nodeNum);
+    return session ? session->sharedNodeSlot : SharedNode::INVALID_SLOT;
 }
 
 bool VirtualNodeManager::isAdmin(const PhoneAPI *api) const

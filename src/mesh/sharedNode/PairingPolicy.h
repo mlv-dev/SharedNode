@@ -7,6 +7,8 @@
  */
 
 #include "Types.h"
+#include "mesh/generated/meshtastic/config.pb.h"
+#include "mesh/generated/meshtastic/mesh.pb.h"
 #include "static/SlotTable.h"
 #include "concurrency/Lock.h"
 
@@ -166,6 +168,22 @@ class PairingPolicy
     uint32_t virtualNodeIdForSlot(uint8_t slotIndex) const;
 
     /**
+     * @brief Looks up the shared-node slot owning a virtual node ID.
+     *
+     * @param virtualNodeId Virtual node ID to find.
+     * @return Slot index, or INVALID_SLOT when no record owns the ID.
+     */
+    uint8_t slotForVirtualNodeId(uint32_t virtualNodeId) const;
+
+    /**
+     * @brief Looks up the role associated with a virtual node ID.
+     *
+     * @param virtualNodeId Virtual node ID to find.
+     * @return Slot-implied role, or Role::UNKNOWN when no record owns the ID.
+     */
+    Role roleForVirtualNodeId(uint32_t virtualNodeId) const;
+
+    /**
      * @brief Persists the virtual node ID assigned to a shared-node slot.
      *
      * Guest display names are regenerated when a guest virtual node ID changes.
@@ -175,6 +193,62 @@ class PairingPolicy
      * @return true when the slot contains a known identity and the ID was stored.
      */
     bool setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualNodeId);
+
+    /**
+     * @brief Builds a User protobuf for a persisted virtual client identity.
+     *
+     * @param virtualNodeId Virtual node ID to read.
+     * @param user Destination user protobuf.
+     * @return true when the virtual identity exists.
+     */
+    bool buildVirtualUser(uint32_t virtualNodeId, meshtastic_User &user) const;
+
+    /**
+     * @brief Builds a security config with keys scoped to a virtual identity.
+     *
+     * Non-key security fields are copied from the device config, while
+     * public_key/private_key come from the virtual client record. Admin keys
+     * are included only for admin-scoped callers.
+     *
+     * @param virtualNodeId Virtual node ID to read.
+     * @param security Destination security config.
+     * @param includeAdminKeys true to preserve admin_key[] in the response.
+     * @return true when the virtual identity exists.
+     */
+    bool buildVirtualSecurityConfig(uint32_t virtualNodeId, meshtastic_Config_SecurityConfig &security,
+                                    bool includeAdminKeys) const;
+
+    /**
+     * @brief Updates the user-visible names of a virtual client identity.
+     *
+     * Empty/null name fields are ignored.
+     *
+     * @param virtualNodeId Virtual node ID to update.
+     * @param shortName New short name, or null/empty to leave unchanged.
+     * @param longName New long name, or null/empty to leave unchanged.
+     * @return true when the virtual identity exists.
+     */
+    bool updateVirtualClientNames(uint32_t virtualNodeId, const char *shortName, const char *longName);
+
+    /**
+     * @brief Regenerates key material for a virtual client identity.
+     *
+     * @param virtualNodeId Virtual node ID to update.
+     * @return true when new key material was generated and persisted.
+     */
+    bool regenerateVirtualClientKeys(uint32_t virtualNodeId);
+
+    /**
+     * @brief Updates virtual client keys from a security config.
+     *
+     * A valid 32-byte private_key is imported and its public key is derived.
+     * Missing/invalid private_key requests a fresh generated keypair.
+     *
+     * @param virtualNodeId Virtual node ID to update.
+     * @param security Security config containing key input.
+     * @return true when key material was updated and persisted.
+     */
+    bool updateVirtualClientKeys(uint32_t virtualNodeId, const meshtastic_Config_SecurityConfig &security);
 
     /**
      * @brief Records a slot for a live connection after slot resolution.
@@ -264,6 +338,15 @@ class PairingPolicy
      * @return Slot index, or -1 when no record matches.
      */
     int8_t findSlotByIdentityLocked(const PeerIdentity &identity) const;
+
+    /**
+     * @brief Finds the slot persisted for a virtual node ID.
+     *
+     * @pre policyLock is held by the caller.
+     * @param virtualNodeId Virtual node ID to find.
+     * @return Slot index, or -1 when no record matches.
+     */
+    int8_t findSlotByVirtualNodeIdLocked(uint32_t virtualNodeId) const;
 
     /**
      * @brief Finds an allocatable guest slot.

@@ -135,6 +135,17 @@ class VirtualNodeManager
     bool isLocalVirtualNode(NodeNum nodeNum) const;
 
     /**
+     * @brief Returns the shared-node slot for an active local virtual node.
+     *
+     * The physical node number is not considered a virtual node, even if an
+     * admin PhoneAPI session is connected.
+     *
+     * @param nodeNum Virtual node number to inspect.
+     * @return Shared-node slot, or INVALID_SLOT when the node is not active locally.
+     */
+    uint8_t sharedNodeSlotForVirtualNode(NodeNum nodeNum) const;
+
+    /**
      * @brief Checks whether a PhoneAPI session is the active admin session.
      *
      * @param api PhoneAPI instance to test.

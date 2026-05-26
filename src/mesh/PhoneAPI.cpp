@@ -299,6 +299,15 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         strncpy(myNodeInfo.pio_env, optstr(APP_ENV), sizeof(myNodeInfo.pio_env));
         myNodeInfo.nodedb_count = static_cast<uint16_t>(nodeDB->getNumMeshNodes());
         fromRadioScratch.my_info = myNodeInfo;
+#ifdef MODE_SHARED_NODE
+        {
+            const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+            const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+            if (virtualNodeId != 0 && virtualNodeId != localNodeNum) {
+                fromRadioScratch.my_info.my_node_num = virtualNodeId;
+            }
+        }
+#endif
         state = STATE_SEND_UIDATA;
 
         service->refreshLocalMeshNode(); // Update my NodeInfo because the client will be asking for it soon.
@@ -313,6 +322,29 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
 
     case STATE_SEND_OWN_NODEINFO: {
         LOG_DEBUG("Send My NodeInfo");
+#ifdef MODE_SHARED_NODE
+        const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+        const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+        if (virtualNodeId != 0 && virtualNodeId != localNodeNum) {
+            meshtastic_NodeInfo info = meshtastic_NodeInfo_init_zero;
+            info.num = virtualNodeId;
+            info.has_user = SharedNode::pairingPolicy.buildVirtualUser(virtualNodeId, info.user);
+            info.has_hops_away = false;
+            info.is_favorite = true;
+            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_node_info_tag;
+            fromRadioScratch.node_info = info;
+            if (readIndex == 0) {
+                readIndex = 1;
+            }
+            if (config_nonce == SPECIAL_NONCE_ONLY_NODES) {
+                state = STATE_SEND_OTHER_NODEINFOS;
+                onNowHasData(0);
+            } else {
+                state = STATE_SEND_METADATA;
+            }
+            break;
+        }
+#endif
         auto us = nodeDB->readNextMeshNode(readIndex);
         if (us) {
             auto info = TypeConversions::ConvertToNodeInfo(us);
@@ -401,7 +433,27 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         case meshtastic_Config_security_tag:
             LOG_DEBUG("Send config: security");
             fromRadioScratch.config.which_payload_variant = meshtastic_Config_security_tag;
-            fromRadioScratch.config.payload_variant.security = config.security;
+#ifdef MODE_SHARED_NODE
+            {
+                const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+                const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+                const bool usesVirtualIdentity = virtualNodeId != 0 && virtualNodeId != localNodeNum;
+                if (usesVirtualIdentity) {
+                    const bool includeAdminKeys =
+                        SharedNode::pairingPolicy.roleForVirtualNodeId(virtualNodeId) == SharedNode::Role::ADMIN;
+                    if (!SharedNode::pairingPolicy.buildVirtualSecurityConfig(
+                            virtualNodeId, fromRadioScratch.config.payload_variant.security, includeAdminKeys)) {
+                        memset(&fromRadioScratch.config.payload_variant.security, 0,
+                               sizeof(fromRadioScratch.config.payload_variant.security));
+                    }
+                } else
+#endif
+                {
+                    fromRadioScratch.config.payload_variant.security = config.security;
+                }
+#ifdef MODE_SHARED_NODE
+            }
+#endif
             break;
         case meshtastic_Config_sessionkey_tag:
             LOG_DEBUG("Send config: sessionkey");

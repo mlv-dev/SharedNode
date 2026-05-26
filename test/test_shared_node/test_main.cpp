@@ -13,6 +13,7 @@ void loop() {}
 
 #include "CryptoEngine.h"
 #include "TestUtil.h"
+#include "configuration.h"
 #include "mesh/NodeDB.h"
 #include "mesh/sharedNode/PairingPolicy.h"
 #include "mesh/sharedNode/RecordProto.h"
@@ -59,12 +60,41 @@ static bool keyMatchesPattern(const uint8_t *key, uint8_t start)
     return true;
 }
 
+static bool adminKeyIsZero(uint8_t index, const meshtastic_Config_SecurityConfig &security)
+{
+    if (security.admin_key[index].size != 0) {
+        return false;
+    }
+    for (uint8_t i = 0; i < sizeof(security.admin_key[index].bytes); i++) {
+        if (security.admin_key[index].bytes[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void setAdminKey(uint8_t index, uint8_t start)
+{
+    if (index >= 3) {
+        return;
+    }
+
+    if (config.security.admin_key_count < index + 1) {
+        config.security.admin_key_count = index + 1;
+    }
+    config.security.admin_key[index].size = SharedNode::PKI_KEY_SIZE;
+    for (uint8_t i = 0; i < SharedNode::PKI_KEY_SIZE; i++) {
+        config.security.admin_key[index].bytes[i] = static_cast<uint8_t>(start + i);
+    }
+}
+
 static void useFakeCrypto()
 {
     nodeDB = nullptr;
     previousCrypto = crypto;
     fakeCrypto.generateCount = 0;
     crypto = &fakeCrypto;
+    config.security = meshtastic_Config_SecurityConfig_init_zero;
 }
 
 static void restoreCrypto()
@@ -193,6 +223,112 @@ static void test_reused_guest_slot_gets_new_keys_for_new_identity()
     TEST_ASSERT_TRUE(keyMatchesPattern(reusedRecord.privateKey, 0x82));
 }
 
+static void test_virtual_user_and_security_config_are_built_from_client_record()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-a"));
+
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(slot, 0x123456ab));
+    TEST_ASSERT_TRUE(policy.updateVirtualClientNames(0x123456ab, "ALF", "Alice"));
+
+    meshtastic_User user = meshtastic_User_init_zero;
+    TEST_ASSERT_TRUE(policy.buildVirtualUser(0x123456ab, user));
+    TEST_ASSERT_EQUAL_STRING("!123456ab", user.id);
+    TEST_ASSERT_EQUAL_STRING("ALF", user.short_name);
+    TEST_ASSERT_EQUAL_STRING("Alice", user.long_name);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, user.public_key.size);
+
+    meshtastic_Config_SecurityConfig security = meshtastic_Config_SecurityConfig_init_zero;
+    TEST_ASSERT_TRUE(policy.buildVirtualSecurityConfig(0x123456ab, security, false));
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.public_key.size);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.private_key.size);
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.public_key.bytes, 0x11));
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.private_key.bytes, 0x81));
+    TEST_ASSERT_EQUAL_UINT8(slot, policy.slotForVirtualNodeId(0x123456ab));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SharedNode::Role::GUEST),
+                            static_cast<uint8_t>(policy.roleForVirtualNodeId(0x123456ab)));
+}
+
+static void test_guest_virtual_security_config_hides_admin_keys()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-a"));
+
+    setAdminKey(0, 0x40);
+    setAdminKey(1, 0x60);
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(slot, 0x123456ab));
+
+    meshtastic_Config_SecurityConfig security = meshtastic_Config_SecurityConfig_init_zero;
+    TEST_ASSERT_TRUE(policy.buildVirtualSecurityConfig(0x123456ab, security, false));
+
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.public_key.size);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.private_key.size);
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.public_key.bytes, 0x11));
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.private_key.bytes, 0x81));
+    TEST_ASSERT_EQUAL_UINT(0, security.admin_key_count);
+    TEST_ASSERT_TRUE(adminKeyIsZero(0, security));
+    TEST_ASSERT_TRUE(adminKeyIsZero(1, security));
+    TEST_ASSERT_TRUE(adminKeyIsZero(2, security));
+}
+
+static void test_admin_virtual_security_config_keeps_admin_keys()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-a"));
+
+    setAdminKey(0, 0x40);
+    setAdminKey(1, 0x60);
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(slot, 0x123456ab));
+
+    meshtastic_Config_SecurityConfig security = meshtastic_Config_SecurityConfig_init_zero;
+    TEST_ASSERT_TRUE(policy.buildVirtualSecurityConfig(0x123456ab, security, true));
+
+    TEST_ASSERT_EQUAL_UINT(2, security.admin_key_count);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.admin_key[0].size);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::PKI_KEY_SIZE, security.admin_key[1].size);
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.admin_key[0].bytes, 0x40));
+    TEST_ASSERT_TRUE(keyMatchesPattern(security.admin_key[1].bytes, 0x60));
+    TEST_ASSERT_TRUE(adminKeyIsZero(2, security));
+}
+
+static void test_guest_key_regeneration_does_not_change_global_admin_keys()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-a"));
+
+    setAdminKey(0, 0x40);
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(slot, 0x123456ab));
+
+    const auto originalAdminKey = config.security.admin_key[0];
+    const pb_size_t originalAdminKeyCount = config.security.admin_key_count;
+    TEST_ASSERT_TRUE(policy.regenerateVirtualClientKeys(0x123456ab));
+
+    TEST_ASSERT_EQUAL_UINT(originalAdminKeyCount, config.security.admin_key_count);
+    TEST_ASSERT_EQUAL_UINT(originalAdminKey.size, config.security.admin_key[0].size);
+    TEST_ASSERT_EQUAL_MEMORY(originalAdminKey.bytes, config.security.admin_key[0].bytes, sizeof(originalAdminKey.bytes));
+}
+
+static void test_regenerating_virtual_client_keys_preserves_names()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-a"));
+
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(slot, 0x123456ab));
+    TEST_ASSERT_TRUE(policy.updateVirtualClientNames(0x123456ab, "ALF", "Alice"));
+    const SharedNode::ClientRecord firstRecord = policy.recordForTest(slot);
+
+    TEST_ASSERT_TRUE(policy.regenerateVirtualClientKeys(0x123456ab));
+    const SharedNode::ClientRecord regeneratedRecord = policy.recordForTest(slot);
+
+    TEST_ASSERT_EQUAL_STRING(firstRecord.shortName, regeneratedRecord.shortName);
+    TEST_ASSERT_EQUAL_STRING(firstRecord.longName, regeneratedRecord.longName);
+    TEST_ASSERT_EQUAL_UINT8(2, fakeCrypto.generateCount);
+    TEST_ASSERT_FALSE(bytesEqual(firstRecord.publicKey, regeneratedRecord.publicKey));
+    TEST_ASSERT_FALSE(bytesEqual(firstRecord.privateKey, regeneratedRecord.privateKey));
+    TEST_ASSERT_TRUE(keyMatchesPattern(regeneratedRecord.publicKey, 0x12));
+    TEST_ASSERT_TRUE(keyMatchesPattern(regeneratedRecord.privateKey, 0x82));
+}
+
 void setup()
 {
     delay(10);
@@ -202,6 +338,11 @@ void setup()
     RUN_TEST(test_virtual_client_keys_are_generated_on_first_virtual_id_assignment);
     RUN_TEST(test_reassigning_same_virtual_id_does_not_regenerate_keys);
     RUN_TEST(test_reused_guest_slot_gets_new_keys_for_new_identity);
+    RUN_TEST(test_virtual_user_and_security_config_are_built_from_client_record);
+    RUN_TEST(test_guest_virtual_security_config_hides_admin_keys);
+    RUN_TEST(test_admin_virtual_security_config_keeps_admin_keys);
+    RUN_TEST(test_guest_key_regeneration_does_not_change_global_admin_keys);
+    RUN_TEST(test_regenerating_virtual_client_keys_preserves_names);
     exit(UNITY_END());
 }
 
