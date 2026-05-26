@@ -9,6 +9,9 @@
 #include "configuration.h"
 #include "RTC.h"
 #include "concurrency/LockGuard.h"
+#if !(MESHTASTIC_EXCLUDE_PKI || MESHTASTIC_EXCLUDE_PKI_KEYGEN)
+#include "mesh/CryptoEngine.h"
+#endif
 #include "mesh/NodeDB.h"
 
 #include <cstring>
@@ -138,18 +141,10 @@ bool PairingPolicy::setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualN
         return false;
     }
 
-    // No persistence needed if this slot is already bound to the same virtual
-    // node ID.
-    if (record.virtualNodeId == virtualNodeId) {
-        return true;
-    }
-
-    record.virtualNodeId = virtualNodeId;
-    // Guest names are deterministic from the virtual ID so reconnecting guests
-    // keep recognizable local node labels.
-    if (roleForSlot(slotIndex) == Role::GUEST) {
-        snprintf(record.shortName, sizeof(record.shortName), "G%02X", static_cast<unsigned>(virtualNodeId) & 0xff);
-        snprintf(record.longName, sizeof(record.longName), "Guest %02X", static_cast<unsigned>(virtualNodeId) & 0xff);
+    const bool alreadyAssigned = record.virtualNodeId == virtualNodeId;
+    const bool changed = assignVirtualClientIdentityLocked(record, virtualNodeId, false);
+    if (!changed) {
+        return alreadyAssigned;
     }
     persistToNodeDBLocked();
     return true;
@@ -378,6 +373,59 @@ int8_t PairingPolicy::findAvailableGuestSlotLocked() const
         [](const ClientRecord &record) { return record.connectionState == ConnectionState::DISCONNECTED; }, 1);
 }
 
+bool PairingPolicy::assignVirtualClientIdentityLocked(ClientRecord &record, uint32_t virtualNodeId, bool forceNewKeys)
+{
+    if (virtualNodeId == 0) {
+        return false;
+    }
+
+    bool changed = false;
+    const bool virtualNodeIdChanged = record.virtualNodeId != virtualNodeId;
+    const bool needsNewKeys = virtualNodeIdChanged || forceNewKeys;
+    uint8_t publicKey[PKI_KEY_SIZE] = {};
+    uint8_t privateKey[PKI_KEY_SIZE] = {};
+    if (needsNewKeys && !generateVirtualClientKeysLocked(publicKey, privateKey)) {
+        return false;
+    }
+
+    if (virtualNodeIdChanged) {
+        record.virtualNodeId = virtualNodeId;
+        changed = true;
+    }
+
+    if (virtualNodeIdChanged || record.shortName[0] == '\0') {
+        snprintf(record.shortName, sizeof(record.shortName), "G%02X", static_cast<unsigned>(virtualNodeId) & 0xff);
+        changed = true;
+    }
+    if (virtualNodeIdChanged || record.longName[0] == '\0') {
+        snprintf(record.longName, sizeof(record.longName), "Guest %02X", static_cast<unsigned>(virtualNodeId) & 0xff);
+        changed = true;
+    }
+
+    if (needsNewKeys) {
+        memcpy(record.publicKey, publicKey, sizeof(record.publicKey));
+        memcpy(record.privateKey, privateKey, sizeof(record.privateKey));
+        changed = true;
+    }
+    return changed;
+}
+
+bool PairingPolicy::generateVirtualClientKeysLocked(uint8_t *publicKey, uint8_t *privateKey)
+{
+#if !(MESHTASTIC_EXCLUDE_PKI || MESHTASTIC_EXCLUDE_PKI_KEYGEN)
+    if (!crypto || !publicKey || !privateKey) {
+        return false;
+    }
+
+    crypto->generateKeyPair(publicKey, privateKey);
+    return true;
+#else
+    (void)publicKey;
+    (void)privateKey;
+    return false;
+#endif
+}
+
 void PairingPolicy::rememberSlotLocked(uint8_t slotIndex, uint16_t connHandle, const PeerIdentity &identity)
 {
     // Validation
@@ -401,16 +449,24 @@ void PairingPolicy::rememberSlotLocked(uint8_t slotIndex, uint16_t connHandle, c
     const bool wasActive = record.isActive();
     const bool wasDisconnected = record.connectionState == ConnectionState::DISCONNECTED;
     const bool changedIdentity = !record.hasIdentity() || record.peerIdentity != identity;
+    const Role role = roleForSlot(slotIndex);
+    bool virtualClientMetadataChanged = false;
 
     if (changedIdentity) {
-        // The slot identity changed, so reset per-client metadata. Guest virtual
+        // The slot identity changed, so reset per-client metadata. The virtual
         // node ID intentionally stays attached to the slot unless reassigned.
-        const Role role = roleForSlot(slotIndex);
         const uint32_t previousVirtualNodeId = (role == Role::GUEST) ? record.virtualNodeId : 0;
-        record = SharedNode::ClientRecord{};
-        record.peerIdentity = identity;
-        record.virtualNodeId = previousVirtualNodeId;
-        record.registerTime = nowSeconds();
+        ClientRecord newRecord;
+        newRecord.peerIdentity = identity;
+        newRecord.registerTime = nowSeconds();
+        if (previousVirtualNodeId != 0) {
+            virtualClientMetadataChanged = assignVirtualClientIdentityLocked(newRecord, previousVirtualNodeId, true);
+            if (!virtualClientMetadataChanged) {
+                LOG_ERROR("Shared-node failed to generate virtual client keys for slot %u", static_cast<unsigned>(slotIndex));
+                return;
+            }
+        }
+        record = newRecord;
     }
 
     record.connectionState = ConnectionState::ACTIVE;
@@ -424,7 +480,8 @@ void PairingPolicy::rememberSlotLocked(uint8_t slotIndex, uint16_t connHandle, c
     // Persist durable identity changes. If the same identity reconnects
     // from DISCONNECTED, save it back as NOT_ACTIVE so the slot is reserved
     // again after reboot.
-    if (changedIdentity || wasDisconnected) {
+    const bool shouldPersistIdentityChange = changedIdentity && (role != Role::GUEST || record.virtualNodeId != 0);
+    if (shouldPersistIdentityChange || wasDisconnected || virtualClientMetadataChanged) {
         persistToNodeDBLocked();
     }
 }
@@ -448,6 +505,10 @@ void PairingPolicy::disconnectSlotLocked(uint8_t slotIndex)
     char longName[LONG_NAME_SIZE] = {};
     strncpy(shortName, record.shortName, sizeof(shortName) - 1);
     strncpy(longName, record.longName, sizeof(longName) - 1);
+    uint8_t publicKey[PKI_KEY_SIZE] = {};
+    uint8_t privateKey[PKI_KEY_SIZE] = {};
+    memcpy(publicKey, record.publicKey, sizeof(publicKey));
+    memcpy(privateKey, record.privateKey, sizeof(privateKey));
 
     record = SharedNode::ClientRecord{};
     record.connectionState = ConnectionState::DISCONNECTED;
@@ -459,6 +520,8 @@ void PairingPolicy::disconnectSlotLocked(uint8_t slotIndex)
     record.registerTime = registerTime;
     strncpy(record.shortName, shortName, sizeof(record.shortName) - 1);
     strncpy(record.longName, longName, sizeof(record.longName) - 1);
+    memcpy(record.publicKey, publicKey, sizeof(record.publicKey));
+    memcpy(record.privateKey, privateKey, sizeof(record.privateKey));
     record.lastSeen = nowSeconds();
 
     if (pendingPairingSlot == slotIndex) {

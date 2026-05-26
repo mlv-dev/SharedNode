@@ -57,6 +57,11 @@ static constexpr size_t SHORT_NAME_SIZE = 5;
 static constexpr size_t LONG_NAME_SIZE = 40;
 
 /**
+ * @brief Curve25519 public/private key size for persisted virtual client identities.
+ */
+static constexpr size_t PKI_KEY_SIZE = 32;
+
+/**
  * @brief Shared-node connection role.
  *
  * This is a mesh/session concept, not a Bluetooth concept. BLE backends use it
@@ -294,7 +299,7 @@ struct ClientRecord {
     uint16_t connHandle = 0;
 
     /**
-     * @brief Virtual node ID assigned to a guest client.
+     * @brief Virtual node ID assigned to a virtual client.
      */
     uint32_t virtualNodeId = 0;
 
@@ -312,6 +317,16 @@ struct ClientRecord {
      * @brief Generated long node name for the virtual identity.
      */
     char longName[LONG_NAME_SIZE] = {};
+
+    /**
+     * @brief Virtual client identity public key.
+     */
+    uint8_t publicKey[PKI_KEY_SIZE] = {};
+
+    /**
+     * @brief Virtual client identity private key.
+     */
+    uint8_t privateKey[PKI_KEY_SIZE] = {};
 
     /**
      * @brief Seconds-since-boot timestamp when this identity was registered.

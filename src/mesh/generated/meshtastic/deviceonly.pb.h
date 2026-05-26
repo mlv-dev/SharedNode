@@ -152,6 +152,8 @@ typedef struct _meshtastic_NodeDatabase {
     std::vector<meshtastic_NodeInfoLite> nodes;
 } meshtastic_NodeDatabase;
 
+typedef PB_BYTES_ARRAY_T(32) meshtastic_SharedNodeClient_public_key_t;
+typedef PB_BYTES_ARRAY_T(32) meshtastic_SharedNodeClient_private_key_t;
 /* Persisted shared-node client slot.
 
  Slot 0 is reserved for the admin identity. Guest slots keep their virtual
@@ -168,10 +170,14 @@ typedef struct _meshtastic_SharedNodeClient {
  Examples are prefixed with "bf:" for Bluefruit/SoftDevice and "nb:" for
  NimBLE. This is intentionally not the current peer address. */
     char peer_identity[32];
+    /* Public key for this shared-node client identity. */
+    meshtastic_SharedNodeClient_public_key_t public_key;
     /* SharedNode::ConnectionState value:
  0 = empty, 1 = disconnected, 2 = not active, 3 = active.
  New pairings may allocate only states 0 and 1. */
     uint32_t connection_state;
+    /* Private key for this shared-node client identity. */
+    meshtastic_SharedNodeClient_private_key_t private_key;
 } meshtastic_SharedNodeClient;
 
 /* Wrapper for shared-node slots. Kept separate from NodeDatabase so pairing
@@ -223,7 +229,7 @@ extern "C" {
 #define meshtastic_NodeInfoLite_init_default     {0, false, meshtastic_UserLite_init_default, false, meshtastic_PositionLite_init_default, 0, 0, false, meshtastic_DeviceMetrics_init_default, 0, 0, false, 0, 0, 0, 0, 0}
 #define meshtastic_DeviceState_init_default      {false, meshtastic_MyNodeInfo_init_default, false, meshtastic_User_init_default, 0, {meshtastic_MeshPacket_init_default}, false, meshtastic_MeshPacket_init_default, 0, 0, 0, false, meshtastic_MeshPacket_init_default, 0, {meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default, meshtastic_NodeRemoteHardwarePin_init_default}}
 #define meshtastic_NodeDatabase_init_default     {0, {0}}
-#define meshtastic_SharedNodeClient_init_default {0, "", "", 0, 0, "", 0}
+#define meshtastic_SharedNodeClient_init_default {0, "", "", 0, 0, "", {0, {0}}, 0, {0, {0}}}
 #define meshtastic_SharedNodeClientStore_init_default {0, {meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default, meshtastic_SharedNodeClient_init_default}}
 #define meshtastic_ChannelFile_init_default      {0, {meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default, meshtastic_Channel_init_default}, 0}
 #define meshtastic_BackupPreferences_init_default {0, 0, false, meshtastic_LocalConfig_init_default, false, meshtastic_LocalModuleConfig_init_default, false, meshtastic_ChannelFile_init_default, false, meshtastic_User_init_default}
@@ -232,7 +238,7 @@ extern "C" {
 #define meshtastic_NodeInfoLite_init_zero        {0, false, meshtastic_UserLite_init_zero, false, meshtastic_PositionLite_init_zero, 0, 0, false, meshtastic_DeviceMetrics_init_zero, 0, 0, false, 0, 0, 0, 0, 0}
 #define meshtastic_DeviceState_init_zero         {false, meshtastic_MyNodeInfo_init_zero, false, meshtastic_User_init_zero, 0, {meshtastic_MeshPacket_init_zero}, false, meshtastic_MeshPacket_init_zero, 0, 0, 0, false, meshtastic_MeshPacket_init_zero, 0, {meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero, meshtastic_NodeRemoteHardwarePin_init_zero}}
 #define meshtastic_NodeDatabase_init_zero        {0, {0}}
-#define meshtastic_SharedNodeClient_init_zero    {0, "", "", 0, 0, "", 0}
+#define meshtastic_SharedNodeClient_init_zero    {0, "", "", 0, 0, "", {0, {0}}, 0, {0, {0}}}
 #define meshtastic_SharedNodeClientStore_init_zero {0, {meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero, meshtastic_SharedNodeClient_init_zero}}
 #define meshtastic_ChannelFile_init_zero         {0, {meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero, meshtastic_Channel_init_zero}, 0}
 #define meshtastic_BackupPreferences_init_zero   {0, 0, false, meshtastic_LocalConfig_init_zero, false, meshtastic_LocalModuleConfig_init_zero, false, meshtastic_ChannelFile_init_zero, false, meshtastic_User_init_zero}
@@ -281,7 +287,9 @@ extern "C" {
 #define meshtastic_SharedNodeClient_register_time_tag 4
 #define meshtastic_SharedNodeClient_last_seen_tag 5
 #define meshtastic_SharedNodeClient_peer_identity_tag 7
+#define meshtastic_SharedNodeClient_public_key_tag 9
 #define meshtastic_SharedNodeClient_connection_state_tag 10
+#define meshtastic_SharedNodeClient_private_key_tag 11
 #define meshtastic_SharedNodeClientStore_clients_tag 1
 #define meshtastic_ChannelFile_channels_tag      1
 #define meshtastic_ChannelFile_version_tag       2
@@ -368,7 +376,9 @@ X(a, STATIC,   SINGULAR, STRING,   long_name,         3) \
 X(a, STATIC,   SINGULAR, FIXED32,  register_time,     4) \
 X(a, STATIC,   SINGULAR, FIXED32,  last_seen,         5) \
 X(a, STATIC,   SINGULAR, STRING,   peer_identity,     7) \
-X(a, STATIC,   SINGULAR, UINT32,   connection_state,  10)
+X(a, STATIC,   SINGULAR, BYTES,    public_key,        9) \
+X(a, STATIC,   SINGULAR, UINT32,   connection_state,  10) \
+X(a, STATIC,   SINGULAR, BYTES,    private_key,      11)
 #define meshtastic_SharedNodeClient_CALLBACK NULL
 #define meshtastic_SharedNodeClient_DEFAULT NULL
 
@@ -422,14 +432,14 @@ extern const pb_msgdesc_t meshtastic_BackupPreferences_msg;
 
 /* Maximum encoded size of messages (where known) */
 /* meshtastic_NodeDatabase_size depends on runtime parameters */
-#define MESHTASTIC_MESHTASTIC_DEVICEONLY_PB_H_MAX_SIZE meshtastic_BackupPreferences_size
+#define MESHTASTIC_MESHTASTIC_DEVICEONLY_PB_H_MAX_SIZE meshtastic_SharedNodeClientStore_size
 #define meshtastic_BackupPreferences_size        2429
 #define meshtastic_ChannelFile_size              718
 #define meshtastic_DeviceState_size              1737
 #define meshtastic_NodeInfoLite_size             196
 #define meshtastic_PositionLite_size             28
-#define meshtastic_SharedNodeClientStore_size    1664
-#define meshtastic_SharedNodeClient_size         102
+#define meshtastic_SharedNodeClientStore_size    2768
+#define meshtastic_SharedNodeClient_size         170
 #define meshtastic_UserLite_size                 98
 
 #ifdef __cplusplus

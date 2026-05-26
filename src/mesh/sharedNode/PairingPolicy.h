@@ -219,6 +219,11 @@ class PairingPolicy
      */
     void clearAllKnownClients() { clearAll(); }
 
+#ifdef PIO_UNIT_TESTING
+    ClientRecord &recordForTest(uint8_t slotIndex) { return records[slotIndex]; }
+    const ClientRecord &recordForTest(uint8_t slotIndex) const { return records[slotIndex]; }
+#endif
+
   private:
     /**
      * @brief Loads persisted client records from NodeDB if not loaded yet.
@@ -270,6 +275,27 @@ class PairingPolicy
      * @return Guest slot index, or -1 when no guest slot is available.
      */
     int8_t findAvailableGuestSlotLocked() const;
+
+    /**
+     * @brief Assigns generated names and key material for a virtual client identity.
+     *
+     * @pre policyLock is held by the caller.
+     * @param record Virtual client record to update.
+     * @param virtualNodeId Non-zero virtual node ID assigned to the client.
+     * @param forceNewKeys true when a reused slot belongs to a new peer.
+     * @return true when durable record data changed.
+     */
+    bool assignVirtualClientIdentityLocked(ClientRecord &record, uint32_t virtualNodeId, bool forceNewKeys);
+
+    /**
+     * @brief Generates direct-message key material for a virtual client identity.
+     *
+     * @pre policyLock is held by the caller.
+     * @param publicKey Output public key buffer.
+     * @param privateKey Output private key buffer.
+     * @return true when key material was generated.
+     */
+    bool generateVirtualClientKeysLocked(uint8_t *publicKey, uint8_t *privateKey);
 
     /**
      * @brief Stores a live connection in a slot and persists identity changes.

@@ -23,6 +23,7 @@
 #include "mesh-pb-constants.h"
 #ifdef MODE_SHARED_NODE
 #include "mesh/sharedNode/PairingPolicy.h"
+#include "mesh/sharedNode/RecordProto.h"
 #endif
 #include "meshUtils.h"
 #include "modules/NeighborInfoModule.h"
@@ -1521,16 +1522,9 @@ void NodeDB::loadClientRecords()
     for (pb_size_t i = 0; i < store.clients_count && i < clientRecords.size(); ++i) {
         const meshtastic_SharedNodeClient &raw = store.clients[i];
         ClientRecord &record = clientRecords[i];
-        record.connHandle = 0;
-        record.virtualNodeId = raw.virtual_node_id;
-        strncpy(record.shortName, raw.short_name, sizeof(record.shortName) - 1);
-        strncpy(record.longName, raw.long_name, sizeof(record.longName) - 1);
-        record.peerIdentity = raw.peer_identity;
-        record.registerTime = raw.register_time;
-        record.lastSeen = raw.last_seen;
+        SharedNode::loadClientRecordFromProto(record, raw);
 
         const bool hasPeerIdentity = raw.peer_identity[0] != '\0';
-        record.connectionState = SharedNode::connectionStateFromValue(raw.connection_state);
         if (record.connectionState == ConnectionState::ACTIVE) {
             record.connectionState = ConnectionState::NOT_ACTIVE;
         }
@@ -1564,15 +1558,8 @@ bool NodeDB::saveClientRecords()
         // Save the whole slot table, including empty slots, to preserve stable
         // slot indexes between firmware boots.
         meshtastic_SharedNodeClient &raw = store.clients[store.clients_count++];
-        raw.virtual_node_id = record.virtualNodeId;
-        strncpy(raw.short_name, record.shortName, sizeof(raw.short_name) - 1);
-        strncpy(raw.long_name, record.longName, sizeof(raw.long_name) - 1);
-        strncpy(raw.peer_identity, record.peerIdentity.c_str(), sizeof(raw.peer_identity) - 1);
-        raw.register_time = record.registerTime;
-        raw.last_seen = record.lastSeen;
-        const ConnectionState storedState =
-            (record.connectionState == ConnectionState::ACTIVE) ? ConnectionState::NOT_ACTIVE : record.connectionState;
-        raw.connection_state = static_cast<uint32_t>(storedState);
+        const bool hasVirtualClientIdentity = record.virtualNodeId != 0;
+        SharedNode::saveClientRecordToProto(raw, record, hasVirtualClientIdentity);
     }
 
     return saveProto(clientRecordsFileName, meshtastic_SharedNodeClientStore_size, &meshtastic_SharedNodeClientStore_msg, &store);
