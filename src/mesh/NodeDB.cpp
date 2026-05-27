@@ -22,8 +22,8 @@
 #include "main.h"
 #include "mesh-pb-constants.h"
 #ifdef MODE_SHARED_NODE
+#include "mesh/sharedNode/ClientRecordStore.h"
 #include "mesh/sharedNode/PairingPolicy.h"
-#include "mesh/sharedNode/RecordProto.h"
 #endif
 #include "meshUtils.h"
 #include "modules/NeighborInfoModule.h"
@@ -64,11 +64,6 @@
 #endif
 
 NodeDB *nodeDB = nullptr;
-
-#ifdef MODE_SHARED_NODE
-using SharedNode::ClientRecord;
-using SharedNode::ConnectionState;
-#endif
 
 // we have plenty of ram so statically alloc this tempbuf (for now)
 EXT_RAM_BSS_ATTR meshtastic_DeviceState devicestate;
@@ -555,7 +550,7 @@ void NodeDB::installDefaultNodeDatabase()
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
 #ifdef MODE_SHARED_NODE
-    clientRecords = {};
+    SharedNode::ClientRecordStore::reset(clientRecords);
 #endif
 }
 
@@ -1467,24 +1462,7 @@ void NodeDB::loadFromDisk()
 #ifdef MODE_SHARED_NODE
 void NodeDB::copySharedNodeRecords(SharedNode::ClientRecord *dest, size_t maxRecords) const
 {
-    if (!dest) {
-        return;
-    }
-
-    const size_t count = std::min(maxRecords, clientRecords.size());
-    for (size_t i = 0; i < count; i++) {
-        dest[i] = clientRecords[i];
-        // connHandle describes current RAM-only BLE state. After boot the
-        // transport must reconnect and prove the same peer identity again.
-        if (dest[i].connectionState == ConnectionState::ACTIVE) {
-            dest[i].connectionState = ConnectionState::NOT_ACTIVE;
-        }
-        dest[i].connHandle = 0;
-    }
-    for (size_t i = count; i < maxRecords; i++) {
-        dest[i] = SharedNode::ClientRecord{};
-        dest[i].connectionState = ConnectionState::EMPTY;
-    }
+    SharedNode::ClientRecordStore::copyForPolicy(clientRecords, dest, maxRecords);
 }
 
 bool NodeDB::saveSharedNodeRecords(const SharedNode::ClientRecord *records, size_t recordCount)
@@ -1493,25 +1471,13 @@ bool NodeDB::saveSharedNodeRecords(const SharedNode::ClientRecord *records, size
         return false;
     }
 
-    const size_t count = std::min(recordCount, clientRecords.size());
-    for (size_t i = 0; i < count; i++) {
-        clientRecords[i] = records[i];
-    }
-    for (size_t i = count; i < clientRecords.size(); i++) {
-        clientRecords[i] = ClientRecord{};
-        clientRecords[i].connectionState = ConnectionState::EMPTY;
-    }
+    SharedNode::ClientRecordStore::replaceFromPolicy(clientRecords, records, recordCount);
     return saveClientRecords();
 }
 
 void NodeDB::loadClientRecords()
 {
-    clientRecords = {};
-    // Initialize defaults before loading so missing/truncated files still leave
-    // the in-memory table with correct defaults.
-    for (uint8_t i = 0; i < clientRecords.size(); i++) {
-        clientRecords[i].connectionState = ConnectionState::EMPTY;
-    }
+    SharedNode::ClientRecordStore::reset(clientRecords);
 
     meshtastic_SharedNodeClientStore store = meshtastic_SharedNodeClientStore_init_zero;
     if (loadProto(clientRecordsFileName, meshtastic_SharedNodeClientStore_size, sizeof(meshtastic_SharedNodeClientStore),
@@ -1519,26 +1485,7 @@ void NodeDB::loadClientRecords()
         return;
     }
 
-    for (pb_size_t i = 0; i < store.clients_count && i < clientRecords.size(); ++i) {
-        const meshtastic_SharedNodeClient &raw = store.clients[i];
-        ClientRecord &record = clientRecords[i];
-        SharedNode::loadClientRecordFromProto(record, raw);
-
-        const bool hasPeerIdentity = raw.peer_identity[0] != '\0';
-        if (record.connectionState == ConnectionState::ACTIVE) {
-            record.connectionState = ConnectionState::NOT_ACTIVE;
-        }
-        if (!hasPeerIdentity &&
-            (record.connectionState == ConnectionState::NOT_ACTIVE || record.connectionState == ConnectionState::ACTIVE)) {
-            record.connectionState = ConnectionState::EMPTY;
-        }
-        if (record.connectionState == ConnectionState::EMPTY) {
-            record = ClientRecord{};
-            record.connectionState = ConnectionState::EMPTY;
-        } else if (!hasPeerIdentity) {
-            record.peerIdentity.clear();
-        }
-    }
+    SharedNode::ClientRecordStore::loadFromProto(clientRecords, store);
 }
 
 bool NodeDB::saveClientRecords()
@@ -1549,18 +1496,7 @@ bool NodeDB::saveClientRecords()
     }
 
     meshtastic_SharedNodeClientStore store = meshtastic_SharedNodeClientStore_init_zero;
-    for (const ClientRecord &record : clientRecords) {
-        if (store.clients_count >= sizeof(store.clients) / sizeof(store.clients[0])) {
-            LOG_WARN("Client record count exceeds protobuf capacity, truncating");
-            break;
-        }
-
-        // Save the whole slot table, including empty slots, to preserve stable
-        // slot indexes between firmware boots.
-        meshtastic_SharedNodeClient &raw = store.clients[store.clients_count++];
-        const bool hasVirtualClientIdentity = record.virtualNodeId != 0;
-        SharedNode::saveClientRecordToProto(raw, record, hasVirtualClientIdentity);
-    }
+    SharedNode::ClientRecordStore::saveToProto(clientRecords, store);
 
     return saveProto(clientRecordsFileName, meshtastic_SharedNodeClientStore_size, &meshtastic_SharedNodeClientStore_msg, &store);
 }

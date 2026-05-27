@@ -484,11 +484,6 @@ void updateBatteryLevel(uint8_t level)
 }
 void NRF52Bluetooth::clearBonds()
 {
-#ifdef MODE_SHARED_NODE
-    if (!bluetooth::canClearKnownClients("clearBonds")) {
-        return;
-    }
-#endif
     LOG_INFO("Clear bluetooth bonds!");
     closeAllBluetoothPhoneAPIs();
 #ifdef MODE_SHARED_NODE

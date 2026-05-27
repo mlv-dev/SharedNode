@@ -4,7 +4,7 @@
 #endif
 #include "ProtobufModule.h"
 #ifdef MODE_SHARED_NODE
-#include "mesh/sharedNode/Types.h"
+#include "MeshTypes.h"
 #endif
 #include <sys/types.h>
 #if HAS_WIFI
@@ -39,28 +39,6 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     virtual bool handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshtastic_AdminMessage *p) override;
 
   private:
-#ifdef MODE_SHARED_NODE
-    /**
-     * @brief Describes an AdminMessage that was rewritten from a local SharedNode virtual client.
-     */
-    struct SharedNodeAdminContext {
-        /**
-         * @brief true when the packet came from an active local virtual node over the API transport.
-         */
-        bool isLocalVirtual = false;
-
-        /**
-         * @brief SharedNode role associated with the virtual node slot.
-         */
-        SharedNode::Role role = SharedNode::Role::UNKNOWN;
-
-        /**
-         * @brief Virtual node ID used as the packet source.
-         */
-        NodeNum virtualNodeId = 0;
-    };
-#endif
-
     bool hasOpenEditTransaction = false;
 
     uint8_t session_passkey[8] = {0};
@@ -114,47 +92,6 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     void handleStoreDeviceUIConfig(const meshtastic_DeviceUIConfig &uicfg);
     void handleSendInputEvent(const meshtastic_AdminMessage_InputEvent &inputEvent);
     void reboot(int32_t seconds);
-
-#ifdef MODE_SHARED_NODE
-    /**
-     * @brief Builds SharedNode admin context from a rewritten local virtual packet.
-     *
-     * @param mp Incoming mesh packet to inspect.
-     * @return Context describing the local virtual source, or defaults when not applicable.
-     */
-    SharedNodeAdminContext getSharedNodeAdminContext(const meshtastic_MeshPacket &mp) const;
-
-    /**
-     * @brief Checks whether a local virtual client may execute an admin payload.
-     *
-     * @param context SharedNode context for the packet source.
-     * @param request Decoded admin request to authorize.
-     * @return true when the payload is allowed for the virtual client role.
-     */
-    bool sharedNodeAdminMessageAllowed(const SharedNodeAdminContext &context, const meshtastic_AdminMessage *request) const;
-
-    /**
-     * @brief Applies an owner/profile update to a local virtual client identity.
-     *
-     * @param virtualNodeId Local virtual node ID to update.
-     * @param owner Requested owner data.
-     * @return true when the virtual identity was found and updated.
-     */
-    bool handleSetVirtualOwner(NodeNum virtualNodeId, const meshtastic_User &owner);
-
-    /**
-     * @brief Applies a scoped security update for a local virtual client.
-     *
-     * Guests can regenerate only their own virtual keys. Admin-scoped virtual
-     * clients may also update shared security fields while preserving the
-     * physical node keypair.
-     *
-     * @param context SharedNode context for the local virtual source.
-     * @param config Requested config payload.
-     * @return true when the scoped update was accepted and persisted.
-     */
-    bool handleSetVirtualSecurityConfig(const SharedNodeAdminContext &context, const meshtastic_Config &config);
-#endif
 
     void setPassKey(meshtastic_AdminMessage *res);
     bool checkPassKey(meshtastic_AdminMessage *res);

@@ -1074,7 +1074,7 @@ void NimbleBluetooth::sendLog(const uint8_t *logMessage, size_t length)
 void clearNVS()
 {
 #ifdef MODE_SHARED_NODE
-    if (!bluetooth::canClearKnownClients("clearNVS")) {
+    if (!bluetooth::canClearKnownClients("clearNVS", bluetooth::KnownClientClearMode::LOCAL_RECOVERY)) {
         return;
     }
     bluetooth::clearKnownClients();

@@ -8,7 +8,7 @@
 #include <Arduino.h>
 
 #ifdef MODE_SHARED_NODE
-#include "mesh/sharedNode/PairingPolicy.h"
+#include "mesh/sharedNode/BluetoothPolicy.h"
 #endif
 
 namespace bluetooth
@@ -64,6 +64,8 @@ void notifyConnected();
 void notifyDisconnected();
 
 #ifdef MODE_SHARED_NODE
+using KnownClientClearMode = SharedNode::BluetoothPolicy::KnownClientClearMode;
+
 /**
  * @brief Forces shared-node Bluetooth config to the required random PIN mode.
  *
@@ -108,9 +110,11 @@ void consumePendingPairingSlot();
  * @brief Checks whether known shared-node/BLE client state may be cleared.
  *
  * @param operationName Human-readable operation name for logging.
- * @return true when an active admin session authorizes the clear operation.
+ * @param mode Authorization mode for the call site.
+ * @return true when the clear operation is allowed.
  */
-bool canClearKnownClients(const char *operationName);
+bool canClearKnownClients(const char *operationName,
+                          KnownClientClearMode mode = KnownClientClearMode::REQUIRE_ACTIVE_ADMIN);
 
 /**
  * @brief Clears known shared-node clients from the pairing policy.

@@ -96,15 +96,10 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
         return SessionStartResult::TABLE_FULL;
     }
 
-    NodeNum virtualNodeId = SharedNode::pairingPolicy.virtualNodeIdForSlot(sharedNodeSlot);
-    if (virtualNodeId == 0) {
-        // First connection for this slot: create the guest node ID and persist
-        // it via the pairing policy so future reconnects keep the same ID.
-        virtualNodeId = allocateVirtualNodeIdLocked();
-        if (!SharedNode::pairingPolicy.setVirtualNodeIdForSlot(sharedNodeSlot, virtualNodeId)) {
-            *session = SessionInfo{};
-            return SessionStartResult::GUEST_IDENTITY_UNAVAILABLE;
-        }
+    NodeNum virtualNodeId = 0;
+    if (!SharedNode::pairingPolicy.ensureVirtualNodeIdForSlot(sharedNodeSlot, virtualNodeId)) {
+        *session = SessionInfo{};
+        return SessionStartResult::GUEST_IDENTITY_UNAVAILABLE;
     }
 
     session->used = true;
@@ -419,27 +414,4 @@ void VirtualNodeManager::enqueueLocalPacketLocked(const PhoneAPI *api, const mes
     session->localPackets.push(packet);
 }
 
-NodeNum VirtualNodeManager::allocateVirtualNodeIdLocked()
-{
-    // Keep virtual node IDs small and visually distinct from the physical node
-    // number. 0 is reserved by packet semantics, 0xff is avoided as a sentinel.
-    if (nextVirtualNodeId < 0x0A || nextVirtualNodeId > 0xFE) {
-        nextVirtualNodeId = 0x0A;
-    }
-
-    for (uint16_t attempts = 0; attempts < 0xF5; attempts++) {
-        const NodeNum candidate = nextVirtualNodeId;
-        nextVirtualNodeId++;
-        if (nextVirtualNodeId > 0xFE) {
-            nextVirtualNodeId = 0x0A;
-        }
-        if (!findSessionByVirtualNodeLocked(candidate)) {
-            return candidate;
-        }
-    }
-
-    // The configured table is tiny, so this should only happen if state is
-    // already inconsistent. Return a candidate rather than blocking pairing.
-    return nextVirtualNodeId++;
-}
 #endif

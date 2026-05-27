@@ -5,10 +5,6 @@
 #include "configuration.h"
 #include "main.h"
 
-#ifdef MODE_SHARED_NODE
-#include "mesh/sharedNode/VirtualNodeManager.h"
-#endif
-
 #include <cstring>
 
 namespace bluetooth
@@ -60,7 +56,7 @@ static void drawPairingPrompt(OLEDDisplay *display, OLEDDisplayUiState *, int16_
 uint32_t choosePairingPasskey()
 {
 #ifdef MODE_SHARED_NODE
-    SharedNode::Pairing pairing = SharedNode::pairingPolicy.beginPairing();
+    SharedNode::Pairing pairing = SharedNode::BluetoothPolicy::beginPairing();
     const SharedNode::Role role = SharedNode::roleForSlot(pairing.slot);
     if (role == SharedNode::Role::ADMIN) {
         LOG_INFO("Use shared-node admin random passkey");
@@ -153,49 +149,32 @@ void enforceSharedNodePairingMode()
 
 void rememberKnownConnection(uint16_t connHandle, const SharedNode::PeerIdentity &identity)
 {
-    // Reconnects can skip the passkey path when the backend already knows the
-    // peer identity; bind the live handle back to its durable slot.
-    const uint8_t knownSlot = SharedNode::pairingPolicy.slotForIdentity(identity);
-    if (knownSlot != SharedNode::INVALID_SLOT) {
-        SharedNode::pairingPolicy.rememberConnectionSlot(connHandle, identity, knownSlot);
-    }
+    SharedNode::BluetoothPolicy::rememberKnownConnection(connHandle, identity);
 }
 
 uint8_t resolveConnectionSlot(uint16_t connHandle, const SharedNode::PeerIdentity &identity)
 {
-    // Authentication completion is where BLE stacks expose the stable identity
-    // needed to turn a pending passkey slot into a durable SharedNode record.
-    return SharedNode::pairingPolicy.resolveSlotForConnection(connHandle, identity);
+    return SharedNode::BluetoothPolicy::resolveConnectionSlot(connHandle, identity);
 }
 
 void logResolvedPairingSlot(uint8_t slot)
 {
-    const SharedNode::Role role = SharedNode::roleForSlot(slot);
-    if (role == SharedNode::Role::ADMIN) {
-        LOG_INFO("Shared-node admin paired");
-    } else if (role == SharedNode::Role::UNKNOWN) {
-        LOG_WARN("Shared-node pairing completed without an available slot");
-    }
+    SharedNode::BluetoothPolicy::logResolvedPairingSlot(slot);
 }
 
 void consumePendingPairingSlot()
 {
-    SharedNode::pairingPolicy.consumePendingPairingSlot();
+    SharedNode::BluetoothPolicy::consumePendingPairingSlot();
 }
 
-bool canClearKnownClients(const char *operationName)
+bool canClearKnownClients(const char *operationName, KnownClientClearMode mode)
 {
-    if (virtualNodeManager.hasActiveAdminSession()) {
-        return true;
-    }
-
-    LOG_WARN("Ignoring shared-node %s without an active admin session", operationName ? operationName : "clear");
-    return false;
+    return SharedNode::BluetoothPolicy::canClearKnownClients(operationName, mode);
 }
 
 void clearKnownClients()
 {
-    SharedNode::pairingPolicy.clearAllKnownClients();
+    SharedNode::BluetoothPolicy::clearKnownClients();
 }
 
 uint32_t fnv1a32(const uint8_t *data, size_t length)

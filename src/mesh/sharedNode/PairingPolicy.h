@@ -195,6 +195,18 @@ class PairingPolicy
     bool setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualNodeId);
 
     /**
+     * @brief Returns or creates the persisted virtual node ID for a guest slot.
+     *
+     * Allocation is owned by PairingPolicy because it can see every persisted
+     * guest record, including inactive clients that do not have live sessions.
+     *
+     * @param slotIndex Shared-node guest slot.
+     * @param virtualNodeId Output virtual node ID when successful.
+     * @return true when the slot contains a known guest identity and has an ID.
+     */
+    bool ensureVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t &virtualNodeId);
+
+    /**
      * @brief Builds a User protobuf for a persisted virtual client identity.
      *
      * @param virtualNodeId Virtual node ID to read.
@@ -371,6 +383,15 @@ class PairingPolicy
     bool assignVirtualClientIdentityLocked(ClientRecord &record, uint32_t virtualNodeId, bool forceNewKeys);
 
     /**
+     * @brief Allocates a virtual node ID that is not used by any persisted record.
+     *
+     * @pre policyLock is held by the caller.
+     * @param slotIndex Slot requesting the ID; an existing ID on this slot may be reused.
+     * @return Non-zero virtual node ID, or 0 when the namespace is exhausted.
+     */
+    uint32_t allocateVirtualNodeIdLocked(uint8_t slotIndex);
+
+    /**
      * @brief Generates direct-message key material for a virtual client identity.
      *
      * @pre policyLock is held by the caller.
@@ -437,9 +458,9 @@ class PairingPolicy
     bool loadedFromNodeDB = false;
 
     /**
-     * @brief Number of client records currently marked connected.
+     * @brief Next candidate virtual node ID for guest allocation.
      */
-    size_t connectedCount = 0;
+    uint32_t nextVirtualNodeId = 0x0A;
 
     /**
      * @brief Fixed-size table of persisted client records.

@@ -517,7 +517,7 @@ void cpuDeepSleep(uint32_t msecToWake)
 void clearBonds()
 {
 #ifdef MODE_SHARED_NODE
-    if (!bluetooth::canClearKnownClients("clearBonds")) {
+    if (!bluetooth::canClearKnownClients("clearBonds", bluetooth::KnownClientClearMode::LOCAL_RECOVERY)) {
         return;
     }
 #endif

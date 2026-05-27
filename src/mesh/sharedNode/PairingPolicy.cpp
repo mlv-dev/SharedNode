@@ -158,6 +158,13 @@ bool PairingPolicy::setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualN
         return false;
     }
 
+    const int8_t existingOwner = findSlotByVirtualNodeIdLocked(virtualNodeId);
+    if (existingOwner >= 0 && static_cast<uint8_t>(existingOwner) != slotIndex) {
+        LOG_WARN("Shared-node virtual node ID 0x%x already belongs to slot %u", virtualNodeId,
+                 static_cast<unsigned>(existingOwner));
+        return false;
+    }
+
     const bool alreadyAssigned = record.virtualNodeId == virtualNodeId;
     const bool changed = assignVirtualClientIdentityLocked(record, virtualNodeId, false);
     if (!changed) {
@@ -165,6 +172,40 @@ bool PairingPolicy::setVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t virtualN
     }
     persistToNodeDBLocked();
     return true;
+}
+
+bool PairingPolicy::ensureVirtualNodeIdForSlot(uint8_t slotIndex, uint32_t &virtualNodeId)
+{
+    virtualNodeId = 0;
+    if (slotIndex >= records.size() || roleForSlot(slotIndex) != Role::GUEST) {
+        return false;
+    }
+
+    concurrency::LockGuard guard(&policyLock);
+    loadFromNodeDBLocked();
+
+    ClientRecord &record = records[slotIndex];
+    if (!record.hasIdentity()) {
+        return false;
+    }
+
+    if (record.virtualNodeId != 0) {
+        virtualNodeId = record.virtualNodeId;
+        return true;
+    }
+
+    const uint32_t allocatedVirtualNodeId = allocateVirtualNodeIdLocked(slotIndex);
+    if (allocatedVirtualNodeId == 0) {
+        return false;
+    }
+
+    if (!assignVirtualClientIdentityLocked(record, allocatedVirtualNodeId, false)) {
+        return false;
+    }
+
+    virtualNodeId = record.virtualNodeId;
+    persistToNodeDBLocked();
+    return virtualNodeId != 0;
 }
 
 bool PairingPolicy::buildVirtualUser(uint32_t virtualNodeId, meshtastic_User &user) const
@@ -392,9 +433,6 @@ void PairingPolicy::clearConnection(uint16_t connHandle)
     }
 
     ClientRecord &record = records[slot];
-    if (record.isActive() && connectedCount > 0) {
-        connectedCount--;
-    }
 
     // A BLE drop only clears the live handle. The identity remains reserved as
     // NOT_ACTIVE so a later reconnect can reclaim the same slot.
@@ -435,7 +473,6 @@ void PairingPolicy::clearAll()
     loadFromNodeDBLocked();
 
     pendingPairingSlot = SharedNode::INVALID_SLOT;
-    connectedCount = 0;
     for (uint8_t i = 0; i < records.size(); i++) {
         clearSlotLocked(i);
     }
@@ -458,7 +495,6 @@ void PairingPolicy::loadFromNodeDBLocked()
 
     // Persisted records describe known identities. Live connection handles are
     // reconstructed after boot, so never trust connHandle from storage.
-    connectedCount = 0;
     for (uint8_t i = 0; i < records.size(); i++) {
         if (records[i].connectionState == ConnectionState::ACTIVE) {
             records[i].connectionState = ConnectionState::NOT_ACTIVE;
@@ -574,6 +610,31 @@ bool PairingPolicy::assignVirtualClientIdentityLocked(ClientRecord &record, uint
     return changed;
 }
 
+uint32_t PairingPolicy::allocateVirtualNodeIdLocked(uint8_t slotIndex)
+{
+    // Keep virtual node IDs compact and recognizable while checking against
+    // every persisted guest identity, not only clients that are connected now.
+    if (nextVirtualNodeId < 0x0A || nextVirtualNodeId > 0xFE) {
+        nextVirtualNodeId = 0x0A;
+    }
+
+    for (uint16_t attempts = 0; attempts < 0xF5; attempts++) {
+        const uint32_t candidate = nextVirtualNodeId;
+        nextVirtualNodeId++;
+        if (nextVirtualNodeId > 0xFE) {
+            nextVirtualNodeId = 0x0A;
+        }
+
+        const int8_t ownerSlot = findSlotByVirtualNodeIdLocked(candidate);
+        if (ownerSlot < 0 || static_cast<uint8_t>(ownerSlot) == slotIndex) {
+            return candidate;
+        }
+    }
+
+    LOG_ERROR("Shared-node virtual node ID namespace is exhausted");
+    return 0;
+}
+
 bool PairingPolicy::generateVirtualClientKeysLocked(uint8_t *publicKey, uint8_t *privateKey)
 {
 #if !(MESHTASTIC_EXCLUDE_PKI || MESHTASTIC_EXCLUDE_PKI_KEYGEN)
@@ -610,7 +671,6 @@ void PairingPolicy::rememberSlotLocked(uint8_t slotIndex, uint16_t connHandle, c
         return;
     }
 
-    const bool wasActive = record.isActive();
     const bool wasDisconnected = record.connectionState == ConnectionState::DISCONNECTED;
     const bool changedIdentity = !record.hasIdentity() || record.peerIdentity != identity;
     const Role role = roleForSlot(slotIndex);
@@ -637,10 +697,6 @@ void PairingPolicy::rememberSlotLocked(uint8_t slotIndex, uint16_t connHandle, c
     record.connHandle = connHandle;
     record.lastSeen = nowSeconds();
 
-    if (!wasActive) {
-        connectedCount++;
-    }
-
     // Persist durable identity changes. If the same identity reconnects
     // from DISCONNECTED, save it back as NOT_ACTIVE so the slot is reserved
     // again after reboot.
@@ -657,9 +713,6 @@ void PairingPolicy::disconnectSlotLocked(uint8_t slotIndex)
     }
 
     ClientRecord &record = records[slotIndex];
-    if (record.isActive() && connectedCount > 0) {
-        connectedCount--;
-    }
 
     const bool hadIdentity = record.hasIdentity();
     const PeerIdentity peerIdentity = record.peerIdentity;

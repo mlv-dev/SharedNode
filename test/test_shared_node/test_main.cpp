@@ -17,6 +17,7 @@ void loop() {}
 #include "mesh/MeshService.h"
 #include "mesh/NodeDB.h"
 #include "mesh/PhoneAPI.h"
+#include "mesh/sharedNode/AdminPolicy.h"
 #include "mesh/sharedNode/PairingPolicy.h"
 #include "mesh/sharedNode/RecordProto.h"
 #include "mesh/sharedNode/VirtualNodeManager.h"
@@ -239,6 +240,46 @@ static void test_reassigning_same_virtual_id_does_not_regenerate_keys()
     TEST_ASSERT_TRUE(bytesEqual(firstRecord.privateKey, sameIdRecord.privateKey));
 }
 
+static void test_pairing_policy_allocates_virtual_ids_without_inactive_collision()
+{
+    SharedNode::PairingPolicy policy;
+    TEST_ASSERT_EQUAL_UINT8(SharedNode::ADMIN_SLOT, policy.resolveSlotForConnection(1, peerIdentity("bf:admin-ids")));
+
+    const uint8_t firstSlot = policy.resolveSlotForConnection(2, peerIdentity("bf:guest-id-a"));
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, firstSlot);
+    uint32_t firstVirtualNodeId = 0;
+    TEST_ASSERT_TRUE(policy.ensureVirtualNodeIdForSlot(firstSlot, firstVirtualNodeId));
+    TEST_ASSERT_NOT_EQUAL_UINT32(0, firstVirtualNodeId);
+
+    policy.clearConnection(2);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SharedNode::ConnectionState::NOT_ACTIVE),
+                            static_cast<uint8_t>(policy.recordForTest(firstSlot).connectionState));
+
+    const uint8_t secondSlot = policy.resolveSlotForConnection(3, peerIdentity("bf:guest-id-b"));
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, secondSlot);
+    TEST_ASSERT_NOT_EQUAL_UINT8(firstSlot, secondSlot);
+
+    uint32_t secondVirtualNodeId = 0;
+    TEST_ASSERT_TRUE(policy.ensureVirtualNodeIdForSlot(secondSlot, secondVirtualNodeId));
+    TEST_ASSERT_NOT_EQUAL_UINT32(0, secondVirtualNodeId);
+    TEST_ASSERT_NOT_EQUAL_UINT32(firstVirtualNodeId, secondVirtualNodeId);
+}
+
+static void test_pairing_policy_rejects_duplicate_virtual_id_assignment()
+{
+    SharedNode::PairingPolicy policy;
+    TEST_ASSERT_EQUAL_UINT8(SharedNode::ADMIN_SLOT, policy.resolveSlotForConnection(1, peerIdentity("bf:admin-dupe")));
+
+    const uint8_t firstSlot = policy.resolveSlotForConnection(2, peerIdentity("bf:guest-dupe-a"));
+    const uint8_t secondSlot = policy.resolveSlotForConnection(3, peerIdentity("bf:guest-dupe-b"));
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, firstSlot);
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, secondSlot);
+
+    TEST_ASSERT_TRUE(policy.setVirtualNodeIdForSlot(firstSlot, 0x123456ab));
+    TEST_ASSERT_FALSE(policy.setVirtualNodeIdForSlot(secondSlot, 0x123456ab));
+    TEST_ASSERT_EQUAL_UINT32(0, policy.recordForTest(secondSlot).virtualNodeId);
+}
+
 static void test_reused_guest_slot_gets_new_keys_for_new_identity()
 {
     SharedNode::PairingPolicy policy;
@@ -368,6 +409,57 @@ static void test_regenerating_virtual_client_keys_preserves_names()
     TEST_ASSERT_TRUE(keyMatchesPattern(regeneratedRecord.privateKey, 0x82));
 }
 
+static void test_shared_node_admin_policy_allows_guest_profile_and_security_only()
+{
+    SharedNode::AdminPolicy::Context context;
+    context.isLocalVirtual = true;
+    context.role = SharedNode::Role::GUEST;
+    context.virtualNodeId = 0x123456ab;
+
+    meshtastic_AdminMessage request = meshtastic_AdminMessage_init_zero;
+    request.which_payload_variant = meshtastic_AdminMessage_set_owner_tag;
+    TEST_ASSERT_TRUE(SharedNode::AdminPolicy::isMessageAllowed(context, &request));
+
+    request = meshtastic_AdminMessage_init_zero;
+    request.which_payload_variant = meshtastic_AdminMessage_get_config_request_tag;
+    request.get_config_request = meshtastic_AdminMessage_ConfigType_SECURITY_CONFIG;
+    TEST_ASSERT_TRUE(SharedNode::AdminPolicy::isMessageAllowed(context, &request));
+
+    request = meshtastic_AdminMessage_init_zero;
+    request.which_payload_variant = meshtastic_AdminMessage_set_channel_tag;
+    TEST_ASSERT_FALSE(SharedNode::AdminPolicy::isMessageAllowed(context, &request));
+}
+
+static void test_shared_node_admin_policy_guest_security_regenerates_only_virtual_keys()
+{
+    SharedNode::PairingPolicy policy;
+    const uint8_t slot = claimGuest(policy, 2, peerIdentity("bf:guest-policy"));
+
+    uint32_t virtualNodeId = 0;
+    TEST_ASSERT_TRUE(policy.ensureVirtualNodeIdForSlot(slot, virtualNodeId));
+    setAdminKey(0, 0x40);
+    const auto originalAdminKey = config.security.admin_key[0];
+    const pb_size_t originalAdminKeyCount = config.security.admin_key_count;
+
+    SharedNode::AdminPolicy::Context context;
+    context.isLocalVirtual = true;
+    context.role = SharedNode::Role::GUEST;
+    context.virtualNodeId = virtualNodeId;
+
+    meshtastic_Config configPayload = meshtastic_Config_init_zero;
+    configPayload.which_payload_variant = meshtastic_Config_security_tag;
+    bool requiresReboot = true;
+    bool managedModeCleared = true;
+    TEST_ASSERT_TRUE(SharedNode::AdminPolicy::applySecurityConfig(context, configPayload, requiresReboot, managedModeCleared));
+
+    TEST_ASSERT_FALSE(requiresReboot);
+    TEST_ASSERT_FALSE(managedModeCleared);
+    TEST_ASSERT_EQUAL_UINT8(2, fakeCrypto.generateCount);
+    TEST_ASSERT_EQUAL_UINT(originalAdminKeyCount, config.security.admin_key_count);
+    TEST_ASSERT_EQUAL_UINT(originalAdminKey.size, config.security.admin_key[0].size);
+    TEST_ASSERT_EQUAL_MEMORY(originalAdminKey.bytes, config.security.admin_key[0].bytes, sizeof(originalAdminKey.bytes));
+}
+
 static void test_phone_api_local_notification_targets_one_connection_and_closes_after_read()
 {
     TestPhoneAPI target;
@@ -484,12 +576,16 @@ void setup()
     RUN_TEST(test_client_record_proto_round_trip_preserves_names_and_keys);
     RUN_TEST(test_virtual_client_keys_are_generated_on_first_virtual_id_assignment);
     RUN_TEST(test_reassigning_same_virtual_id_does_not_regenerate_keys);
+    RUN_TEST(test_pairing_policy_allocates_virtual_ids_without_inactive_collision);
+    RUN_TEST(test_pairing_policy_rejects_duplicate_virtual_id_assignment);
     RUN_TEST(test_reused_guest_slot_gets_new_keys_for_new_identity);
     RUN_TEST(test_virtual_user_and_security_config_are_built_from_client_record);
     RUN_TEST(test_guest_virtual_security_config_hides_admin_keys);
     RUN_TEST(test_admin_virtual_security_config_keeps_admin_keys);
     RUN_TEST(test_guest_key_regeneration_does_not_change_global_admin_keys);
     RUN_TEST(test_regenerating_virtual_client_keys_preserves_names);
+    RUN_TEST(test_shared_node_admin_policy_allows_guest_profile_and_security_only);
+    RUN_TEST(test_shared_node_admin_policy_guest_security_regenerates_only_virtual_keys);
     RUN_TEST(test_phone_api_local_notification_targets_one_connection_and_closes_after_read);
     RUN_TEST(test_guest_phone_api_receives_local_notification_before_guest_queue_filter);
     RUN_TEST(test_virtual_node_manager_admin_duplicate_has_reason);

@@ -7,7 +7,7 @@
 
 #include "mesh/PhoneAPI.h"
 #ifdef MODE_SHARED_NODE
-#include "mesh/sharedNode/PairingPolicy.h"
+#include "mesh/sharedNode/BluetoothPolicy.h"
 #endif
 #include "mesh/sharedNode/static/ObjectPool.h"
 #include "mesh/sharedNode/static/SlotTable.h"
@@ -86,7 +86,7 @@ template <typename ApiT, size_t MaxConnections = MAX_BLUETOOTH_CONNECTIONS> clas
             api->close();
         });
 #ifdef MODE_SHARED_NODE
-        SharedNode::pairingPolicy.clearConnection(connHandle);
+        SharedNode::BluetoothPolicy::clearConnection(connHandle);
 #endif
     }
 
@@ -102,7 +102,7 @@ template <typename ApiT, size_t MaxConnections = MAX_BLUETOOTH_CONNECTIONS> clas
             visitor(api);
             api->close();
 #ifdef MODE_SHARED_NODE
-            SharedNode::pairingPolicy.clearConnection(connHandle);
+            SharedNode::BluetoothPolicy::clearConnection(connHandle);
 #else
             (void)connHandle;
 #endif
@@ -131,7 +131,7 @@ template <typename ApiT, size_t MaxConnections = MAX_BLUETOOTH_CONNECTIONS> clas
         }
 
 #ifdef MODE_SHARED_NODE
-        api->setSharedNodeSlot(SharedNode::pairingPolicy.slotForConnection(connHandle));
+        api->setSharedNodeSlot(SharedNode::BluetoothPolicy::slotForConnection(connHandle));
 #else
         (void)connHandle;
 #endif

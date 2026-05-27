@@ -261,11 +261,6 @@ class VirtualNodeManager
     mutable concurrency::Lock sessionLock;
 
     /**
-     * @brief Next candidate virtual node ID for guest allocation.
-     */
-    NodeNum nextVirtualNodeId = 0x0A;
-
-    /**
      * @brief Fixed-size table of active admin and guest sessions.
      */
     std::array<SessionInfo, SharedNode::MAX_CONNECTIONS> sessions{};
@@ -337,13 +332,6 @@ class VirtualNodeManager
      */
     void enqueueLocalPacketLocked(const PhoneAPI *api, const meshtastic_MeshPacket &packet);
 
-    /**
-     * @brief Allocates the next unused guest virtual node ID.
-     *
-     * @pre sessionLock is held by the caller.
-     * @return Virtual node ID candidate.
-     */
-    NodeNum allocateVirtualNodeIdLocked();
 };
 
 /**
