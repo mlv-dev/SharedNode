@@ -18,10 +18,12 @@ void loop() {}
 #include "mesh/NodeDB.h"
 #include "mesh/PhoneAPI.h"
 #include "mesh/sharedNode/AdminPolicy.h"
+#include "mesh/sharedNode/LocalPacketPool.h"
 #include "mesh/sharedNode/PairingPolicy.h"
 #include "mesh/sharedNode/RecordProto.h"
 #include "mesh/sharedNode/VirtualNodeManager.h"
 
+#include <array>
 #include <cstring>
 
 class FakeCryptoEngine : public CryptoEngine
@@ -141,6 +143,17 @@ static bool readClientNotification(TestPhoneAPI &api, meshtastic_ClientNotificat
     TEST_ASSERT_EQUAL(meshtastic_FromRadio_clientNotification_tag, fromRadio.which_payload_variant);
     notification = fromRadio.clientNotification;
     return true;
+}
+
+static meshtastic_MeshPacket makeLocalPacket(uint32_t id, NodeNum to = NODENUM_BROADCAST,
+                                             meshtastic_PortNum portnum = meshtastic_PortNum_TEXT_MESSAGE_APP)
+{
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_zero;
+    packet.id = id;
+    packet.to = to;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded.portnum = portnum;
+    return packet;
 }
 
 static uint8_t claimGuest(SharedNode::PairingPolicy &policy, uint16_t connHandle, const SharedNode::PeerIdentity &identity)
@@ -460,6 +473,139 @@ static void test_shared_node_admin_policy_guest_security_regenerates_only_virtua
     TEST_ASSERT_EQUAL_MEMORY(originalAdminKey.bytes, config.security.admin_key[0].bytes, sizeof(originalAdminKey.bytes));
 }
 
+static void test_local_packet_pool_broadcast_is_stored_once_for_multiple_guests()
+{
+    SharedNode::LocalPacketPool pool;
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> sessions{};
+    pool.initializeSession(sessions[0], 1);
+    pool.initializeSession(sessions[1], 1);
+
+    TEST_ASSERT_TRUE(pool.enqueueBroadcast(makeLocalPacket(100), sessions.data(), sessions.size(), 2));
+    auto stats = pool.getStatsForTest();
+    TEST_ASSERT_EQUAL_UINT(1, stats.usedTotal);
+    TEST_ASSERT_EQUAL_UINT(1, stats.usedBroadcast);
+
+    meshtastic_MeshPacket out = meshtastic_MeshPacket_init_zero;
+    TEST_ASSERT_TRUE(pool.pop(0, sessions.data(), sessions.size(), out, 3));
+    TEST_ASSERT_EQUAL_UINT32(100, out.id);
+    stats = pool.getStatsForTest();
+    TEST_ASSERT_EQUAL_UINT(1, stats.usedBroadcast);
+
+    out = meshtastic_MeshPacket_init_zero;
+    TEST_ASSERT_TRUE(pool.pop(1, sessions.data(), sessions.size(), out, 4));
+    TEST_ASSERT_EQUAL_UINT32(100, out.id);
+    stats = pool.getStatsForTest();
+    TEST_ASSERT_EQUAL_UINT(0, stats.usedBroadcast);
+    TEST_ASSERT_EQUAL_UINT(0, stats.usedTotal);
+}
+
+static void test_local_packet_pool_delivers_service_then_direct_then_broadcast()
+{
+    SharedNode::LocalPacketPool pool;
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> sessions{};
+    pool.initializeSession(sessions[0], 1);
+
+    TEST_ASSERT_TRUE(pool.enqueueBroadcast(makeLocalPacket(100), sessions.data(), sessions.size(), 2));
+    TEST_ASSERT_TRUE(pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::DIRECT, 0, sessions.data(), sessions.size(),
+                                         makeLocalPacket(200, 0x12345678), 3));
+    TEST_ASSERT_TRUE(pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::SERVICE, 0, sessions.data(), sessions.size(),
+                                         makeLocalPacket(300, 0x12345678, meshtastic_PortNum_ADMIN_APP), 4));
+
+    meshtastic_MeshPacket out = meshtastic_MeshPacket_init_zero;
+    TEST_ASSERT_TRUE(pool.pop(0, sessions.data(), sessions.size(), out, 5));
+    TEST_ASSERT_EQUAL_UINT32(300, out.id);
+    TEST_ASSERT_TRUE(pool.pop(0, sessions.data(), sessions.size(), out, 6));
+    TEST_ASSERT_EQUAL_UINT32(200, out.id);
+    TEST_ASSERT_TRUE(pool.pop(0, sessions.data(), sessions.size(), out, 7));
+    TEST_ASSERT_EQUAL_UINT32(100, out.id);
+}
+
+static void test_local_packet_pool_preserves_broadcast_reserve_from_targeted_traffic()
+{
+    SharedNode::LocalPacketPool pool;
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> sessions{};
+    for (size_t i = 0; i < sessions.size(); i++) {
+        pool.initializeSession(sessions[i], 1);
+    }
+
+    for (size_t round = 0; round < SharedNode::LOCAL_PACKET_POOL_SIZE * 2; round++) {
+        const uint8_t target = static_cast<uint8_t>(round % sessions.size());
+        pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::DIRECT, target, sessions.data(), sessions.size(),
+                             makeLocalPacket(static_cast<uint32_t>(200 + round), 0x12345678), 2);
+    }
+
+    auto stats = pool.getStatsForTest();
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(SharedNode::LOCAL_PACKET_POOL_SIZE - SharedNode::LOCAL_BROADCAST_RESERVED, stats.usedDirect);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(SharedNode::LOCAL_BROADCAST_RESERVED, stats.freeCount);
+
+    for (size_t i = 0; i < SharedNode::LOCAL_BROADCAST_RESERVED; i++) {
+        TEST_ASSERT_TRUE(pool.enqueueBroadcast(makeLocalPacket(static_cast<uint32_t>(500 + i)), sessions.data(), sessions.size(),
+                                               static_cast<uint32_t>(10 + i)));
+    }
+
+    stats = pool.getStatsForTest();
+    TEST_ASSERT_EQUAL_UINT(SharedNode::LOCAL_BROADCAST_RESERVED, stats.usedBroadcast);
+    TEST_ASSERT_EQUAL_UINT(SharedNode::LOCAL_PACKET_POOL_SIZE, stats.usedTotal);
+}
+
+static void test_local_packet_pool_targeted_traffic_only_evicts_extra_broadcast()
+{
+    SharedNode::LocalPacketPool pool;
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> sessions{};
+    for (size_t i = 0; i < sessions.size(); i++) {
+        pool.initializeSession(sessions[i], 1);
+    }
+
+    const size_t extraBroadcasts =
+        SharedNode::LOCAL_PACKET_POOL_SIZE > SharedNode::LOCAL_BROADCAST_RESERVED
+            ? (SharedNode::LOCAL_PACKET_POOL_SIZE - SharedNode::LOCAL_BROADCAST_RESERVED > 4 ? 4
+                                                                                              : SharedNode::LOCAL_PACKET_POOL_SIZE -
+                                                                                                    SharedNode::LOCAL_BROADCAST_RESERVED)
+            : 0;
+    TEST_ASSERT_GREATER_THAN_UINT(0, extraBroadcasts);
+    for (size_t i = 0; i < SharedNode::LOCAL_BROADCAST_RESERVED + extraBroadcasts; i++) {
+        TEST_ASSERT_TRUE(pool.enqueueBroadcast(makeLocalPacket(static_cast<uint32_t>(600 + i)), sessions.data(), sessions.size(),
+                                               static_cast<uint32_t>(2 + i)));
+    }
+
+    for (size_t round = 0; round < SharedNode::LOCAL_PACKET_POOL_SIZE * 3; round++) {
+        const uint8_t target = static_cast<uint8_t>(round % sessions.size());
+        pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::DIRECT, target, sessions.data(), sessions.size(),
+                             makeLocalPacket(static_cast<uint32_t>(800 + round), 0x12345678),
+                             static_cast<uint32_t>(20 + round));
+    }
+
+    const auto stats = pool.getStatsForTest();
+    TEST_ASSERT_EQUAL_UINT(SharedNode::LOCAL_BROADCAST_RESERVED, stats.usedBroadcast);
+}
+
+static void test_local_packet_pool_dead_session_is_purged_under_pressure()
+{
+    SharedNode::LocalPacketPool pool;
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> sessions{};
+    for (size_t i = 0; i < sessions.size(); i++) {
+        pool.initializeSession(sessions[i], 1);
+    }
+
+    for (size_t i = 0; i < SharedNode::LOCAL_ACTIVE_MAX_DIRECT; i++) {
+        TEST_ASSERT_TRUE(pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::DIRECT, 0, sessions.data(), sessions.size(),
+                                             makeLocalPacket(static_cast<uint32_t>(1000 + i), 0x12345678),
+                                             static_cast<uint32_t>(2 + i)));
+    }
+    SharedNode::LocalPacketPool::setLastLocalPollMsForTest(sessions[0], 0);
+
+    const uint32_t pressureTime = SharedNode::LOCAL_DEAD_MS + 1;
+    for (size_t round = 0; round < SharedNode::LOCAL_PACKET_POOL_SIZE * 3; round++) {
+        const uint8_t target = static_cast<uint8_t>(1 + (round % (sessions.size() - 1)));
+        pool.enqueueTargeted(SharedNode::LocalPacketPool::PacketKind::DIRECT, target, sessions.data(), sessions.size(),
+                             makeLocalPacket(static_cast<uint32_t>(1200 + round), 0x12345678), pressureTime);
+    }
+
+    const auto sessionStats = SharedNode::LocalPacketPool::getSessionStatsForTest(sessions[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, sessionStats.pendingDirect);
+    TEST_ASSERT_GREATER_THAN_UINT32(0, sessionStats.droppedLocalPackets);
+}
+
 static void test_phone_api_local_notification_targets_one_connection_and_closes_after_read()
 {
     TestPhoneAPI target;
@@ -586,6 +732,11 @@ void setup()
     RUN_TEST(test_regenerating_virtual_client_keys_preserves_names);
     RUN_TEST(test_shared_node_admin_policy_allows_guest_profile_and_security_only);
     RUN_TEST(test_shared_node_admin_policy_guest_security_regenerates_only_virtual_keys);
+    RUN_TEST(test_local_packet_pool_broadcast_is_stored_once_for_multiple_guests);
+    RUN_TEST(test_local_packet_pool_delivers_service_then_direct_then_broadcast);
+    RUN_TEST(test_local_packet_pool_preserves_broadcast_reserve_from_targeted_traffic);
+    RUN_TEST(test_local_packet_pool_targeted_traffic_only_evicts_extra_broadcast);
+    RUN_TEST(test_local_packet_pool_dead_session_is_purged_under_pressure);
     RUN_TEST(test_phone_api_local_notification_targets_one_connection_and_closes_after_read);
     RUN_TEST(test_guest_phone_api_receives_local_notification_before_guest_queue_filter);
     RUN_TEST(test_virtual_node_manager_admin_duplicate_has_reason);

@@ -98,7 +98,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
 
     NodeNum virtualNodeId = 0;
     if (!SharedNode::pairingPolicy.ensureVirtualNodeIdForSlot(sharedNodeSlot, virtualNodeId)) {
-        *session = SessionInfo{};
+        clearSessionLocked(*session);
         return SessionStartResult::GUEST_IDENTITY_UNAVAILABLE;
     }
 
@@ -106,6 +106,9 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
     session->api = api;
     session->sharedNodeSlot = sharedNodeSlot;
     session->virtualNodeId = virtualNodeId;
+    // Guest local delivery starts at the current broadcast tail, so reconnects
+    // do not replay stale shared backlog from before this PhoneAPI session.
+    localPacketPool.initializeSession(localDeliverySessions[session->sessionIndex], millis());
     return SessionStartResult::OK;
 }
 
@@ -118,7 +121,7 @@ void VirtualNodeManager::disconnect(PhoneAPI *api)
     concurrency::LockGuard guard(&sessionLock);
     SessionInfo *session = findSessionByApiLocked(api);
     if (session) {
-        *session = SessionInfo{};
+        clearSessionLocked(*session);
     }
 }
 
@@ -185,7 +188,7 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
             localPacket.next_hop = NO_NEXT_HOP_PREFERENCE;
             localPacket.relay_node = NO_RELAY_NODE;
 
-            enqueueLocalPacketLocked(localSession->api, localPacket);
+            enqueueLocalPacketLocked(*localSession, localPacket, SharedNode::LocalPacketPool::PacketKind::DIRECT);
             return {OutgoingPacketDecision::HANDLED_LOCAL, OutgoingRejectionReason::NONE};
         }
     }
@@ -196,6 +199,8 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
         packet.from = session->virtualNodeId;
     }
 
+    // Admin/physical-node traffic is intentionally not moved into the guest
+    // LocalPacketPool; it keeps the normal, more reliable PhoneAPI path.
     return {OutgoingPacketDecision::ALLOW_RADIO, OutgoingRejectionReason::NONE};
 }
 
@@ -262,18 +267,27 @@ void VirtualNodeManager::handleIncomingPacket(meshtastic_MeshPacket &packet)
 
     concurrency::LockGuard guard(&sessionLock);
     const NodeNum localNodeNum = nodeDB->getNodeNum();
-    for (SessionInfo &session : sessions) {
-        const bool sessionUsesVirtualIdentity = session.virtualNodeId != 0 && session.virtualNodeId != localNodeNum;
-        if (!session.used || !session.api || !sessionUsesVirtualIdentity) {
-            continue;
+    if (isBroadcast(packet.to)) {
+        bool hasGuestRecipient = false;
+        for (const SessionInfo &session : sessions) {
+            if (isLocalDeliveryGuestLocked(session, localNodeNum)) {
+                hasGuestRecipient = true;
+                break;
+            }
         }
+        if (hasGuestRecipient) {
+            // Broadcast packets are stored once and replayed through per-guest
+            // cursors so a large guest count does not multiply RAM usage.
+            localPacketPool.enqueueBroadcast(packet, localDeliverySessions.data(), localDeliverySessions.size(), millis());
+        }
+        return;
+    }
 
-        if (isBroadcast(packet.to) || packet.to == session.virtualNodeId) {
-            // Guest sessions receive broadcast mesh traffic plus unicast
-            // traffic addressed to their virtual node number. They do not read
-            // the physical node's global phone queue.
-            enqueueLocalPacketLocked(session.api, packet);
-        }
+    SessionInfo *session = findSessionByVirtualNodeLocked(packet.to);
+    if (session && isLocalDeliveryGuestLocked(*session, localNodeNum)) {
+        // Unicast packets for a virtual guest remain targeted entries; control
+        // plane packets get the small service lane ahead of normal DMs.
+        enqueueLocalPacketLocked(*session, packet, classifyTargetedLocalPacket(packet));
     }
 }
 
@@ -285,11 +299,14 @@ bool VirtualNodeManager::popLocalPacketForApi(const PhoneAPI *api, meshtastic_Me
 
     concurrency::LockGuard guard(&sessionLock);
     SessionInfo *session = findSessionByApiLocked(const_cast<PhoneAPI *>(api));
-    if (!session) {
+    if (!session || session->sessionIndex >= localDeliverySessions.size()) {
         return false;
     }
 
-    return session->localPackets.pop(packetOut);
+    // Only virtual guests read from LocalPacketPool. Admin sessions fall
+    // through here because they never receive an initialized guest state.
+    return localPacketPool.pop(session->sessionIndex, localDeliverySessions.data(), localDeliverySessions.size(), packetOut,
+                               millis());
 }
 
 bool VirtualNodeManager::hasLocalPacketForApi(const PhoneAPI *api) const
@@ -300,7 +317,10 @@ bool VirtualNodeManager::hasLocalPacketForApi(const PhoneAPI *api) const
 
     concurrency::LockGuard guard(&sessionLock);
     const SessionInfo *session = findSessionByApiLocked(api);
-    return session && !session->localPackets.empty();
+    // The global PhoneAPI queue remains authoritative for the admin/physical
+    // node; this predicate only reports guest-local pool availability.
+    return session && session->sessionIndex < localDeliverySessions.size() &&
+           localPacketPool.hasPending(localDeliverySessions[session->sessionIndex]);
 }
 
 NodeNum VirtualNodeManager::getVirtualNodeId(const PhoneAPI *api) const
@@ -364,10 +384,15 @@ bool VirtualNodeManager::hasActiveAdminSession() const
 
 VirtualNodeManager::SessionInfo *VirtualNodeManager::allocateSessionLocked()
 {
-    SessionInfo *session = sessionSlots.allocate([](const SessionInfo &candidate) { return !candidate.used; });
+    uint8_t sessionIndex = SharedNode::LocalPacketPool::INVALID_INDEX;
+    SessionInfo *session = sessionSlots.allocate([](const SessionInfo &candidate) { return !candidate.used; }, 0, &sessionIndex);
     if (session) {
+        if (sessionIndex < localDeliverySessions.size()) {
+            localPacketPool.cleanupSession(localDeliverySessions[sessionIndex], sessionIndex);
+        }
         *session = SessionInfo{};
         session->used = true;
+        session->sessionIndex = sessionIndex;
     }
     return session;
 }
@@ -405,13 +430,56 @@ bool VirtualNodeManager::hasAdminLocked(const PhoneAPI *exceptApi) const
     return false;
 }
 
-void VirtualNodeManager::enqueueLocalPacketLocked(const PhoneAPI *api, const meshtastic_MeshPacket &packet)
+void VirtualNodeManager::clearSessionLocked(SessionInfo &session)
 {
-    SessionInfo *session = findSessionByApiLocked(const_cast<PhoneAPI *>(api));
-    if (!session) {
+    if (session.sessionIndex < localDeliverySessions.size()) {
+        // Disconnect releases targeted guest packets immediately. Shared
+        // broadcast entries are reclaimed separately by active guest cursors.
+        localPacketPool.cleanupSession(localDeliverySessions[session.sessionIndex], session.sessionIndex);
+    }
+    session = SessionInfo{};
+}
+
+bool VirtualNodeManager::isLocalDeliveryGuestLocked(const SessionInfo &session, NodeNum localNodeNum) const
+{
+    return session.used && session.api && session.sessionIndex < localDeliverySessions.size() && session.virtualNodeId != 0 &&
+           session.virtualNodeId != localNodeNum && SharedNode::roleForSlot(session.sharedNodeSlot) == SharedNode::Role::GUEST;
+}
+
+SharedNode::LocalPacketPool::PacketKind
+VirtualNodeManager::classifyTargetedLocalPacket(const meshtastic_MeshPacket &packet) const
+{
+    if (packet.which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
+        (packet.decoded.portnum == meshtastic_PortNum_ADMIN_APP || packet.decoded.portnum == meshtastic_PortNum_ROUTING_APP)) {
+        // Keep SERVICE narrow: it is for local control-plane responses, not a
+        // general "important packet" class.
+        return SharedNode::LocalPacketPool::PacketKind::SERVICE;
+    }
+    return SharedNode::LocalPacketPool::PacketKind::DIRECT;
+}
+
+void VirtualNodeManager::enqueueLocalPacketLocked(SessionInfo &session, const meshtastic_MeshPacket &packet,
+                                                  SharedNode::LocalPacketPool::PacketKind kind)
+{
+    if (session.sessionIndex >= localDeliverySessions.size()) {
         return;
     }
-    session->localPackets.push(packet);
+    // The pool owns reserve accounting and pressure eviction; the manager only
+    // resolves the live destination and packet class.
+    localPacketPool.enqueueTargeted(kind, session.sessionIndex, localDeliverySessions.data(), localDeliverySessions.size(), packet,
+                                    millis());
 }
+
+#ifdef PIO_UNIT_TESTING
+SharedNode::LocalPacketPool::SessionStats VirtualNodeManager::getLocalSessionStatsForTest(const PhoneAPI *api) const
+{
+    concurrency::LockGuard guard(&sessionLock);
+    const SessionInfo *session = findSessionByApiLocked(api);
+    if (!session || session->sessionIndex >= localDeliverySessions.size()) {
+        return {};
+    }
+    return SharedNode::LocalPacketPool::getSessionStatsForTest(localDeliverySessions[session->sessionIndex]);
+}
+#endif
 
 #endif

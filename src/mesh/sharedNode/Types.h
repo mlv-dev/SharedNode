@@ -9,8 +9,76 @@
 #include <Arduino.h>
 #include <cstring>
 
+/**
+ * @brief Default total number of SharedNode client connections.
+ *
+ * This includes the physical admin connection plus every guest connection.
+ */
 #ifndef SHARED_NODE_MAX_CLIENTS
 #define SHARED_NODE_MAX_CLIENTS 5
+#endif
+
+/**
+ * @brief Default number of packet slots in the guest local-delivery pool.
+ */
+#ifndef SHARED_NODE_LOCAL_PACKET_POOL_SIZE
+#define SHARED_NODE_LOCAL_PACKET_POOL_SIZE 32
+#endif
+
+/**
+ * @brief Default minimum number of packet slots reserved for broadcast backlog.
+ */
+#ifndef SHARED_NODE_LOCAL_BROADCAST_RESERVED
+#define SHARED_NODE_LOCAL_BROADCAST_RESERVED 8
+#endif
+
+/**
+ * @brief Default idle time in milliseconds before a guest is considered stalled.
+ */
+#ifndef SHARED_NODE_LOCAL_STALLED_MS
+#define SHARED_NODE_LOCAL_STALLED_MS 30000
+#endif
+
+/**
+ * @brief Default idle time in milliseconds before a guest is considered dead.
+ */
+#ifndef SHARED_NODE_LOCAL_DEAD_MS
+#define SHARED_NODE_LOCAL_DEAD_MS 600000
+#endif
+
+/**
+ * @brief Default per-session SERVICE packet cap for an active guest.
+ */
+#ifndef SHARED_NODE_LOCAL_ACTIVE_MAX_SERVICE
+#define SHARED_NODE_LOCAL_ACTIVE_MAX_SERVICE 4
+#endif
+
+/**
+ * @brief Default per-session DIRECT packet cap for an active guest.
+ */
+#ifndef SHARED_NODE_LOCAL_ACTIVE_MAX_DIRECT
+#define SHARED_NODE_LOCAL_ACTIVE_MAX_DIRECT 8
+#endif
+
+/**
+ * @brief Default per-session SERVICE packet cap for a stalled guest.
+ */
+#ifndef SHARED_NODE_LOCAL_STALLED_MAX_SERVICE
+#define SHARED_NODE_LOCAL_STALLED_MAX_SERVICE 1
+#endif
+
+/**
+ * @brief Default per-session DIRECT packet cap for a stalled guest.
+ */
+#ifndef SHARED_NODE_LOCAL_STALLED_MAX_DIRECT
+#define SHARED_NODE_LOCAL_STALLED_MAX_DIRECT 1
+#endif
+
+/**
+ * @brief Default broadcast backlog, in packet slots, preserved for stalled guests.
+ */
+#ifndef SHARED_NODE_LOCAL_STALLED_BROADCAST_BACKLOG
+#define SHARED_NODE_LOCAL_STALLED_BROADCAST_BACKLOG 0
 #endif
 
 /**
@@ -22,7 +90,8 @@ namespace SharedNode
 /**
  * @brief Maximum number of shared-node client connections.
  *
- * The value includes the admin slot plus all guest slots.
+ * The value includes the admin slot plus all guest slots. It is limited to 32
+ * because LocalPacketPool metadata stores the target session index in 5 bits.
  */
 static constexpr size_t MAX_CLIENTS = SHARED_NODE_MAX_CLIENTS;
 
@@ -30,6 +99,83 @@ static constexpr size_t MAX_CLIENTS = SHARED_NODE_MAX_CLIENTS;
  * @brief Maximum number of guest clients allowed in shared-node mode.
  */
 static constexpr size_t MAX_GUESTS = SHARED_NODE_MAX_CLIENTS - 1;
+
+/**
+ * @brief Maximum number of packet slots in the shared guest local-delivery pool.
+ *
+ * Unit: packet slots. Each slot stores one meshtastic_MeshPacket plus compact
+ * pool metadata.
+ */
+static constexpr size_t LOCAL_PACKET_POOL_SIZE = SHARED_NODE_LOCAL_PACKET_POOL_SIZE;
+
+/**
+ * @brief Packet slots reserved as the minimum guest broadcast backlog.
+ *
+ * Unit: packet slots. Targeted traffic may not consume free slots needed to
+ * let broadcast usage return to this floor.
+ */
+static constexpr size_t LOCAL_BROADCAST_RESERVED = SHARED_NODE_LOCAL_BROADCAST_RESERVED;
+
+/**
+ * @brief Idle interval after which a connected guest is treated as stalled.
+ *
+ * Unit: milliseconds since the guest last polled local delivery.
+ */
+static constexpr uint32_t LOCAL_STALLED_MS = SHARED_NODE_LOCAL_STALLED_MS;
+
+/**
+ * @brief Idle interval after which a connected guest is treated as dead.
+ *
+ * Unit: milliseconds since the guest last polled local delivery.
+ */
+static constexpr uint32_t LOCAL_DEAD_MS = SHARED_NODE_LOCAL_DEAD_MS;
+
+/**
+ * @brief Maximum service/control packets retained for an active guest.
+ *
+ * Unit: per-session packet count.
+ */
+static constexpr size_t LOCAL_ACTIVE_MAX_SERVICE = SHARED_NODE_LOCAL_ACTIVE_MAX_SERVICE;
+
+/**
+ * @brief Maximum direct packets retained for an active guest.
+ *
+ * Unit: per-session packet count.
+ */
+static constexpr size_t LOCAL_ACTIVE_MAX_DIRECT = SHARED_NODE_LOCAL_ACTIVE_MAX_DIRECT;
+
+/**
+ * @brief Maximum service/control packets retained for a stalled guest.
+ *
+ * Unit: per-session packet count.
+ */
+static constexpr size_t LOCAL_STALLED_MAX_SERVICE = SHARED_NODE_LOCAL_STALLED_MAX_SERVICE;
+
+/**
+ * @brief Maximum direct packets retained for a stalled guest.
+ *
+ * Unit: per-session packet count.
+ */
+static constexpr size_t LOCAL_STALLED_MAX_DIRECT = SHARED_NODE_LOCAL_STALLED_MAX_DIRECT;
+
+/**
+ * @brief Broadcast packets a stalled guest may keep behind its cursor.
+ *
+ * Unit: packet slots. Zero means stalled guests do not retain broadcast backlog
+ * during pressure reclaim.
+ */
+static constexpr size_t LOCAL_STALLED_BROADCAST_BACKLOG = SHARED_NODE_LOCAL_STALLED_BROADCAST_BACKLOG;
+
+// The packed LocalPacketEntry metadata allocates five bits for the target
+// session index, so the local delivery table cannot grow beyond 32 entries.
+static_assert(MAX_CLIENTS <= 32, "SharedNode local packet metadata supports at most 32 total clients");
+static_assert(LOCAL_PACKET_POOL_SIZE > 0, "SharedNode local packet pool must contain at least one slot");
+static_assert(LOCAL_PACKET_POOL_SIZE <= 255, "SharedNode local packet pool uses uint8_t indexes with 0xff as invalid");
+static_assert(LOCAL_BROADCAST_RESERVED <= LOCAL_PACKET_POOL_SIZE,
+              "SharedNode broadcast reserve cannot exceed the local packet pool size");
+static_assert(LOCAL_ACTIVE_MAX_SERVICE <= 255 && LOCAL_ACTIVE_MAX_DIRECT <= 255 &&
+                  LOCAL_STALLED_MAX_SERVICE <= 255 && LOCAL_STALLED_MAX_DIRECT <= 255,
+              "SharedNode local packet per-session caps must fit in uint8_t counters");
 
 /**
  * @brief Slot index reserved for the admin client.

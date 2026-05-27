@@ -12,8 +12,8 @@
 #include "configuration.h"
 #include "MeshTypes.h"
 #include "concurrency/Lock.h"
+#include "mesh/sharedNode/LocalPacketPool.h"
 #include "mesh/sharedNode/Types.h"
-#include "mesh/sharedNode/static/RingQueue.h"
 #include "mesh/sharedNode/static/SlotTable.h"
 
 class PhoneAPI;
@@ -24,16 +24,13 @@ class PhoneAPI;
  * VirtualNodeManager maps connected PhoneAPI clients to either the real local
  * node identity for the admin session or to per-guest virtual node IDs. It also
  * enforces guest restrictions on outgoing admin packets and queues packets that
- * can be delivered locally between clients on the same device.
+ * can be delivered locally between clients on the same device. Guest local
+ * delivery is routed through SharedNode::LocalPacketPool; the admin/physical
+ * node remains on the normal PhoneAPI global queue and radio paths.
  */
 class VirtualNodeManager
 {
   public:
-    /**
-     * @brief Maximum number of locally queued packets per PhoneAPI session.
-     */
-    static constexpr size_t MAX_PENDING_PACKETS_PER_API = 32;
-
     /**
      * @brief Runtime state for one connected admin or guest session.
      */
@@ -54,14 +51,18 @@ class VirtualNodeManager
         uint8_t sharedNodeSlot = SharedNode::INVALID_SLOT;
 
         /**
+         * @brief Runtime table index used by both session and guest delivery state.
+         *
+         * LocalPacketPool stores only compact indexes in packet metadata, so
+         * this value is the bridge between the live session table and the
+         * parallel local-delivery state array.
+         */
+        uint8_t sessionIndex = SharedNode::LocalPacketPool::INVALID_INDEX;
+
+        /**
          * @brief Indicates whether this slot currently contains an active session.
          */
         bool used = false;
-
-        /**
-         * @brief Queue of packets waiting for local delivery to this session.
-         */
-        StaticRingQueue<meshtastic_MeshPacket, MAX_PENDING_PACKETS_PER_API, DropOldest> localPackets{};
     };
 
     /**
@@ -233,12 +234,20 @@ class VirtualNodeManager
     /**
      * @brief Queues an incoming mesh packet for matching local guest sessions.
      *
+     * This path is guest-only: broadcasts are stored once in the shared pool
+     * for all active virtual guests, and unicasts to a virtual guest become
+     * targeted pool entries. The physical node/admin delivery path is left to
+     * the regular PhoneAPI queue.
+     *
      * @param packet Incoming packet to offer to local guest queues.
      */
     void handleIncomingPacket(meshtastic_MeshPacket &packet);
 
     /**
      * @brief Checks whether a PhoneAPI session has queued local packets.
+     *
+     * Only virtual guest sessions consult LocalPacketPool. Admin/physical
+     * sessions should continue through the normal global PhoneAPI queue.
      *
      * @param api PhoneAPI instance to inspect.
      * @return true when at least one local packet is queued.
@@ -248,11 +257,31 @@ class VirtualNodeManager
     /**
      * @brief Pops the oldest locally queued packet for a PhoneAPI session.
      *
+     * The pool returns SERVICE, DIRECT, then shared BROADCAST packets for guest
+     * sessions. Admin/physical sessions do not consume this guest-only pool.
+     *
      * @param api PhoneAPI instance to inspect.
      * @param packetOut Destination updated with the popped packet.
      * @return true when a packet was popped.
      */
     bool popLocalPacketForApi(const PhoneAPI *api, meshtastic_MeshPacket &packetOut);
+
+#ifdef PIO_UNIT_TESTING
+    /**
+     * @brief Returns local packet pool counters for unit tests.
+     *
+     * @return Snapshot of shared guest local-delivery pool counters.
+     */
+    SharedNode::LocalPacketPool::Stats getLocalPacketPoolStatsForTest() const { return localPacketPool.getStatsForTest(); }
+
+    /**
+     * @brief Returns local delivery counters for a live API session.
+     *
+     * @param api PhoneAPI instance to inspect.
+     * @return Snapshot of that session's local delivery counters, or empty stats.
+     */
+    SharedNode::LocalPacketPool::SessionStats getLocalSessionStatsForTest(const PhoneAPI *api) const;
+#endif
 
   private:
     /**
@@ -269,6 +298,16 @@ class VirtualNodeManager
      * @brief Predicate helper used to search the session table.
      */
     StaticSlotTable<SessionInfo, SharedNode::MAX_CLIENTS> sessionSlots;
+
+    /**
+     * @brief Per-session guest delivery state indexed by SessionInfo::sessionIndex.
+     */
+    std::array<SharedNode::LocalPacketPool::SessionState, SharedNode::MAX_CLIENTS> localDeliverySessions{};
+
+    /**
+     * @brief Shared static packet pool used only by guest local delivery.
+     */
+    SharedNode::LocalPacketPool localPacketPool;
 
     /**
      * @brief Allocates a free session slot.
@@ -324,13 +363,55 @@ class VirtualNodeManager
     bool hasAdminLocked(const PhoneAPI *exceptApi = nullptr) const;
 
     /**
-     * @brief Queues a packet for local delivery to a PhoneAPI session.
+     * @brief Clears a live session and releases any guest local delivery state.
+     *
+     * Guest cleanup immediately releases targeted packet slots. Shared
+     * broadcast entries remain globally owned and are reclaimed by cursors.
      *
      * @pre sessionLock is held by the caller.
-     * @param api Destination PhoneAPI instance.
-     * @param packet Packet to queue.
+     * @param session Session to clear.
      */
-    void enqueueLocalPacketLocked(const PhoneAPI *api, const meshtastic_MeshPacket &packet);
+    void clearSessionLocked(SessionInfo &session);
+
+    /**
+     * @brief Returns true when a session is a virtual guest with local delivery.
+     *
+     * This excludes the admin/physical node even when an admin PhoneAPI session
+     * is connected, keeping the guest eviction pool isolated from the main node.
+     *
+     * @pre sessionLock is held by the caller.
+     * @param session Session to inspect.
+     * @param localNodeNum Physical node number.
+     * @return true when the session represents a virtual guest.
+     */
+    bool isLocalDeliveryGuestLocked(const SessionInfo &session, NodeNum localNodeNum) const;
+
+    /**
+     * @brief Classifies a targeted packet for local delivery priority.
+     *
+     * SERVICE is intentionally narrow and reserved for local control-plane
+     * traffic. Ordinary data-plane packets remain DIRECT so they cannot starve
+     * broadcast or other guests as high-priority traffic.
+     *
+     * @param packet Packet to classify.
+     * @return SERVICE for narrow control-plane packets, otherwise DIRECT.
+     */
+    SharedNode::LocalPacketPool::PacketKind classifyTargetedLocalPacket(const meshtastic_MeshPacket &packet) const;
+
+    /**
+     * @brief Queues a packet for local delivery to a guest session.
+     *
+     * The helper assumes the caller has already selected a live virtual guest
+     * destination and classified the packet. Admin/physical traffic is not
+     * routed through this helper.
+     *
+     * @pre sessionLock is held by the caller.
+     * @param session Destination session.
+     * @param packet Packet to queue.
+     * @param kind Local delivery class.
+     */
+    void enqueueLocalPacketLocked(SessionInfo &session, const meshtastic_MeshPacket &packet,
+                                  SharedNode::LocalPacketPool::PacketKind kind);
 
 };
 
