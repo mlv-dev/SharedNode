@@ -154,6 +154,9 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         if (!sharedNodeAdminMessageAllowed(sharedNodeContext, r)) {
             LOG_INFO("Reject scoped shared-node admin payload %i from virtual node 0x%x", r->which_payload_variant,
                      sharedNodeContext.virtualNodeId);
+            virtualNodeManager.sendNotificationToVirtualNode(
+                sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                virtualNodeManager.getOutgoingRejectionMessage(VirtualNodeManager::OutgoingRejectionReason::AdminOnly));
             myReply = allocErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &mp);
             return handled;
         }
@@ -289,6 +292,9 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
 #ifdef MODE_SHARED_NODE
         if (isSharedNodeLocalVirtual) {
             if (!handleSetVirtualOwner(sharedNodeContext.virtualNodeId, r->set_owner)) {
+                virtualNodeManager.sendNotificationToVirtualNode(
+                    sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                    "Could not update your shared-node profile. Ask the admin to reconnect you.");
                 myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
             }
             break;
@@ -303,6 +309,9 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
 #ifdef MODE_SHARED_NODE
         if (isSharedNodeLocalVirtual && r->set_config.which_payload_variant == meshtastic_Config_security_tag) {
             if (!handleSetVirtualSecurityConfig(sharedNodeContext, r->set_config)) {
+                virtualNodeManager.sendNotificationToVirtualNode(
+                    sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                    "Could not prepare your shared-node identity. Ask the admin to reconnect you.");
                 myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
             }
             break;

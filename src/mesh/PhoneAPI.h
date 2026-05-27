@@ -87,6 +87,8 @@ class PhoneAPI
 
     // Keep ClientNotification packet just as packetForPhone
     meshtastic_ClientNotification *clientNotification = NULL;
+    bool closeAfterClientNotification = false;
+    bool closeAfterFromRadioRead = false;
 
     /// We temporarily keep the nodeInfo here between the call to available and getFromRadio
     meshtastic_NodeInfo nodeInfoForPhone = meshtastic_NodeInfo_init_default;
@@ -140,6 +142,16 @@ class PhoneAPI
     virtual void sendNotification(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message);
 
     /**
+     * Send a notification, then ask the transport to close after the client has read it.
+     */
+    void sendNotificationAndClose(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message);
+
+    /**
+     * Called by transports after a FromRadio read response has been handed to the client.
+     */
+    void onFromRadioReadComplete();
+
+    /**
      * Get the next packet we want to send to the phone
      *
      * We assume buf is at least FromRadio_size bytes long.
@@ -156,6 +168,9 @@ class PhoneAPI
 
     bool isConnected() { return state != STATE_SEND_NOTHING; }
     bool isSendingPackets() { return state == STATE_SEND_PACKETS; }
+#ifdef PIO_UNIT_TESTING
+    void setSendingPacketsForTest() { state = STATE_SEND_PACKETS; }
+#endif
 
   protected:
     /// Our fromradio packet while it is being assembled
@@ -177,6 +192,9 @@ class PhoneAPI
      * Subclasses can use this as a hook to provide custom notifications for their transport (i.e. bluetooth notifies)
      */
     virtual void onNowHasData(uint32_t fromRadioNum) {}
+
+    /// Transport-specific hook used after a final notification has been delivered.
+    virtual void onCloseAfterNotificationDelivered() {}
 
     /// Subclasses can use these lifecycle hooks for transport-specific behavior around config/steady-state
     /// (i.e. BLE connection params)
@@ -214,6 +232,8 @@ class PhoneAPI
     void releaseMqttClientProxyPhonePacket();
 
     void releaseClientNotification();
+
+    void queueClientNotification(meshtastic_ClientNotification *notification, bool closeAfterDelivery);
 
     bool wasSeenRecently(uint32_t packetId);
 

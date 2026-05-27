@@ -14,9 +14,12 @@ void loop() {}
 #include "CryptoEngine.h"
 #include "TestUtil.h"
 #include "configuration.h"
+#include "mesh/MeshService.h"
 #include "mesh/NodeDB.h"
+#include "mesh/PhoneAPI.h"
 #include "mesh/sharedNode/PairingPolicy.h"
 #include "mesh/sharedNode/RecordProto.h"
+#include "mesh/sharedNode/VirtualNodeManager.h"
 
 #include <cstring>
 
@@ -37,6 +40,8 @@ class FakeCryptoEngine : public CryptoEngine
 
 static FakeCryptoEngine fakeCrypto;
 static CryptoEngine *previousCrypto = nullptr;
+static MeshService testMeshService;
+static MeshService *previousService = nullptr;
 
 static SharedNode::PeerIdentity peerIdentity(const char *value)
 {
@@ -91,16 +96,50 @@ static void setAdminKey(uint8_t index, uint8_t start)
 static void useFakeCrypto()
 {
     nodeDB = nullptr;
+    previousService = service;
+    service = &testMeshService;
     previousCrypto = crypto;
     fakeCrypto.generateCount = 0;
     crypto = &fakeCrypto;
     config.security = meshtastic_Config_SecurityConfig_init_zero;
+    SharedNode::pairingPolicy.clearAll();
 }
 
 static void restoreCrypto()
 {
     crypto = previousCrypto;
     previousCrypto = nullptr;
+    service = previousService;
+    previousService = nullptr;
+}
+
+class TestPhoneAPI : public PhoneAPI
+{
+  public:
+    bool notified = false;
+    bool closeAfterNotification = false;
+
+  protected:
+    bool checkIsConnected() override { return true; }
+
+    void onNowHasData(uint32_t) override { notified = true; }
+
+    void onCloseAfterNotificationDelivered() override { closeAfterNotification = true; }
+};
+
+static bool readClientNotification(TestPhoneAPI &api, meshtastic_ClientNotification &notification)
+{
+    uint8_t buffer[meshtastic_FromRadio_size] = {};
+    const size_t length = api.getFromRadio(buffer);
+    if (length == 0) {
+        return false;
+    }
+
+    meshtastic_FromRadio fromRadio = meshtastic_FromRadio_init_zero;
+    TEST_ASSERT_TRUE(pb_decode_from_bytes(buffer, length, &meshtastic_FromRadio_msg, &fromRadio));
+    TEST_ASSERT_EQUAL(meshtastic_FromRadio_clientNotification_tag, fromRadio.which_payload_variant);
+    notification = fromRadio.clientNotification;
+    return true;
 }
 
 static uint8_t claimGuest(SharedNode::PairingPolicy &policy, uint16_t connHandle, const SharedNode::PeerIdentity &identity)
@@ -329,6 +368,114 @@ static void test_regenerating_virtual_client_keys_preserves_names()
     TEST_ASSERT_TRUE(keyMatchesPattern(regeneratedRecord.privateKey, 0x82));
 }
 
+static void test_phone_api_local_notification_targets_one_connection_and_closes_after_read()
+{
+    TestPhoneAPI target;
+    TestPhoneAPI other;
+
+    target.sendNotificationAndClose(meshtastic_LogRecord_Level_ERROR, 0, "Shared node is full. Ask the admin to free a guest slot.");
+
+    uint8_t otherBuffer[meshtastic_FromRadio_size] = {};
+    TEST_ASSERT_EQUAL_UINT(0, other.getFromRadio(otherBuffer));
+
+    meshtastic_ClientNotification notification = meshtastic_ClientNotification_init_zero;
+    TEST_ASSERT_TRUE(readClientNotification(target, notification));
+    TEST_ASSERT_EQUAL(meshtastic_LogRecord_Level_ERROR, notification.level);
+    TEST_ASSERT_FALSE(notification.has_reply_id);
+    TEST_ASSERT_EQUAL_STRING("Shared node is full. Ask the admin to free a guest slot.", notification.message);
+    TEST_ASSERT_TRUE(target.notified);
+    TEST_ASSERT_FALSE(target.closeAfterNotification);
+
+    target.onFromRadioReadComplete();
+    TEST_ASSERT_TRUE(target.closeAfterNotification);
+}
+
+static void test_guest_phone_api_receives_local_notification_before_guest_queue_filter()
+{
+    TestPhoneAPI guest;
+    guest.setSharedNodeSlot(1);
+    guest.setSendingPacketsForTest();
+
+    guest.sendNotification(meshtastic_LogRecord_Level_WARNING, 42, "Only the shared node admin can change this setting.");
+
+    meshtastic_ClientNotification notification = meshtastic_ClientNotification_init_zero;
+    TEST_ASSERT_TRUE(readClientNotification(guest, notification));
+    TEST_ASSERT_EQUAL(meshtastic_LogRecord_Level_WARNING, notification.level);
+    TEST_ASSERT_TRUE(notification.has_reply_id);
+    TEST_ASSERT_EQUAL_UINT32(42, notification.reply_id);
+    TEST_ASSERT_EQUAL_STRING("Only the shared node admin can change this setting.", notification.message);
+}
+
+static void test_virtual_node_manager_admin_duplicate_has_reason()
+{
+    VirtualNodeManager manager;
+    TestPhoneAPI adminA;
+    TestPhoneAPI adminB;
+    adminA.setSharedNodeSlot(SharedNode::ADMIN_SLOT);
+    adminB.setSharedNodeSlot(SharedNode::ADMIN_SLOT);
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+                            static_cast<uint8_t>(manager.connectAsAdmin(&adminA)));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::AdminAlreadyConnected),
+                            static_cast<uint8_t>(manager.connectAsAdmin(&adminB)));
+}
+
+static void test_virtual_node_manager_guest_limit_has_reason()
+{
+    VirtualNodeManager manager;
+    TestPhoneAPI guests[SharedNode::MAX_GUESTS + 1];
+
+    const uint8_t adminSlot = SharedNode::pairingPolicy.resolveSlotForConnection(1, peerIdentity("bf:admin-limit"));
+    TEST_ASSERT_EQUAL_UINT8(SharedNode::ADMIN_SLOT, adminSlot);
+    const uint8_t guestSlot = SharedNode::pairingPolicy.resolveSlotForConnection(2, peerIdentity("bf:guest-limit"));
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, guestSlot);
+
+    for (size_t i = 0; i < SharedNode::MAX_GUESTS; i++) {
+        guests[i].setSharedNodeSlot(guestSlot);
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+                                static_cast<uint8_t>(manager.connectAsGuest(&guests[i])));
+    }
+
+    guests[SharedNode::MAX_GUESTS].setSharedNodeSlot(guestSlot);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::GuestLimitReached),
+                            static_cast<uint8_t>(manager.connectAsGuest(&guests[SharedNode::MAX_GUESTS])));
+}
+
+static void test_virtual_node_manager_invalid_guest_slot_has_reason()
+{
+    VirtualNodeManager manager;
+    TestPhoneAPI guest;
+    guest.setSharedNodeSlot(SharedNode::INVALID_SLOT);
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::UnknownRole),
+                            static_cast<uint8_t>(manager.connectAsGuest(&guest)));
+}
+
+static void test_virtual_node_manager_rejects_guest_admin_for_other_profile_with_reason()
+{
+    VirtualNodeManager manager;
+    TestPhoneAPI guest;
+
+    TEST_ASSERT_EQUAL_UINT8(SharedNode::ADMIN_SLOT,
+                            SharedNode::pairingPolicy.resolveSlotForConnection(1, peerIdentity("bf:admin-reject")));
+    const uint8_t guestSlot = SharedNode::pairingPolicy.resolveSlotForConnection(2, peerIdentity("bf:guest-reject"));
+    TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, guestSlot);
+    guest.setSharedNodeSlot(guestSlot);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+                            static_cast<uint8_t>(manager.connectAsGuest(&guest)));
+
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_zero;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded.portnum = meshtastic_PortNum_ADMIN_APP;
+    packet.to = 0x12345678;
+
+    const VirtualNodeManager::OutgoingPacketResult result = manager.handleOutgoingPacket(packet, &guest);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingPacketDecision::Reject),
+                            static_cast<uint8_t>(result.decision));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingRejectionReason::NotOwnProfile),
+                            static_cast<uint8_t>(result.rejectionReason));
+}
+
 void setup()
 {
     delay(10);
@@ -343,6 +490,12 @@ void setup()
     RUN_TEST(test_admin_virtual_security_config_keeps_admin_keys);
     RUN_TEST(test_guest_key_regeneration_does_not_change_global_admin_keys);
     RUN_TEST(test_regenerating_virtual_client_keys_preserves_names);
+    RUN_TEST(test_phone_api_local_notification_targets_one_connection_and_closes_after_read);
+    RUN_TEST(test_guest_phone_api_receives_local_notification_before_guest_queue_filter);
+    RUN_TEST(test_virtual_node_manager_admin_duplicate_has_reason);
+    RUN_TEST(test_virtual_node_manager_guest_limit_has_reason);
+    RUN_TEST(test_virtual_node_manager_invalid_guest_slot_has_reason);
+    RUN_TEST(test_virtual_node_manager_rejects_guest_admin_for_other_profile_with_reason);
     exit(UNITY_END());
 }
 

@@ -67,21 +67,51 @@ class VirtualNodeManager
     /**
      * @brief Decision returned after processing a client-originated packet.
      */
-    enum OutgoingPacketDecision : uint8_t {
+    enum class OutgoingPacketDecision : uint8_t {
       /**
        * @brief Allow the packet to continue to the radio path.
        */
-      OUTGOING_ALLOW_RADIO = 0,
+      AllowRadio = 0,
 
       /**
        * @brief Reject the packet before it reaches the radio path.
        */
-      OUTGOING_REJECT = 1,
+      Reject = 1,
 
       /**
        * @brief Packet was queued for another local virtual node.
        */
-      OUTGOING_HANDLED_LOCAL = 2,
+      HandledLocal = 2,
+    };
+
+    /**
+     * @brief Result returned when registering an API session.
+     */
+    enum class SessionStartResult : uint8_t {
+        Ok = 0,
+        UnknownRole = 1,
+        AdminAlreadyConnected = 2,
+        GuestLimitReached = 3,
+        TableFull = 4,
+        GuestIdentityUnavailable = 5,
+    };
+
+    /**
+     * @brief User-facing reason for a rejected outgoing packet.
+     */
+    enum class OutgoingRejectionReason : uint8_t {
+        None = 0,
+        NotAuthorized = 1,
+        AdminOnly = 2,
+        NotOwnProfile = 3,
+    };
+
+    /**
+     * @brief Result returned after processing a client-originated packet.
+     */
+    struct OutgoingPacketResult {
+        OutgoingPacketDecision decision = OutgoingPacketDecision::AllowRadio;
+        OutgoingRejectionReason rejectionReason = OutgoingRejectionReason::None;
     };
 
     /**
@@ -95,9 +125,9 @@ class VirtualNodeManager
      * Only one active admin session is allowed at a time.
      *
      * @param api PhoneAPI instance for the connected client.
-     * @return true when the session was connected as admin.
+     * @return Session registration result.
      */
-    bool connectAsAdmin(PhoneAPI *api);
+    SessionStartResult connectAsAdmin(PhoneAPI *api);
 
     /**
      * @brief Connects a PhoneAPI session as a shared-node guest.
@@ -107,9 +137,9 @@ class VirtualNodeManager
      * SharedNodePairingPolicy.
      *
      * @param api PhoneAPI instance for the connected client.
-     * @return true when the session was connected as guest.
+     * @return Session registration result.
      */
-    bool connectAsGuest(PhoneAPI *api);
+    SessionStartResult connectAsGuest(PhoneAPI *api);
 
     /**
      * @brief Disconnects a PhoneAPI session and clears its runtime state.
@@ -169,9 +199,36 @@ class VirtualNodeManager
      *
      * @param packet Packet to inspect and possibly rewrite.
      * @param sourceApi Source PhoneAPI instance, or nullptr for non-client packets.
-     * @return Decision describing how the caller should handle the packet.
+     * @return Result describing how the caller should handle the packet.
      */
-    OutgoingPacketDecision handleOutgoingPacket(meshtastic_MeshPacket &packet, PhoneAPI *sourceApi);
+    OutgoingPacketResult handleOutgoingPacket(meshtastic_MeshPacket &packet, PhoneAPI *sourceApi);
+
+    /**
+     * @brief Queues a user-facing notification to an active virtual client.
+     *
+     * @param nodeNum Active virtual node ID to notify.
+     * @param level Notification level.
+     * @param replyId Packet ID associated with the failed action, or 0.
+     * @param message User-facing message.
+     * @return true when a live local session received the notification.
+     */
+    bool sendNotificationToVirtualNode(NodeNum nodeNum, meshtastic_LogRecord_Level level, uint32_t replyId, const char *message);
+
+    /**
+     * @brief Maps a session start result to a user-facing message.
+     *
+     * @param result Session start result.
+     * @return Message text, or nullptr for success.
+     */
+    static const char *getSessionStartMessage(SessionStartResult result);
+
+    /**
+     * @brief Maps an outgoing rejection reason to a user-facing message.
+     *
+     * @param reason Rejection reason.
+     * @return Message text, or nullptr when no message is needed.
+     */
+    static const char *getOutgoingRejectionMessage(OutgoingRejectionReason reason);
 
     /**
      * @brief Queues an incoming mesh packet for matching local guest sessions.

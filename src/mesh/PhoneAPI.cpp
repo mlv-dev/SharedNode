@@ -59,20 +59,21 @@ void PhoneAPI::handleStartConfig()
     // Must be before setting state (because state is how we know !connected)
     if (!isConnected()) {
 #ifdef MODE_SHARED_NODE
-        bool authenticated = false;
+        VirtualNodeManager::SessionStartResult sessionStartResult = VirtualNodeManager::SessionStartResult::UnknownRole;
         // Transport layer has already chosen the slot via SharedNodePairingPolicy.
         // Now we just need to register the session in VirtualNodeManager.
         if (isAdmin()) {
             // Admin role: already authenticated via BLE pairing
-            authenticated = virtualNodeManager.connectAsAdmin(this);
+            sessionStartResult = virtualNodeManager.connectAsAdmin(this);
         } else if (isGuest()) {
             // Guest role: already authenticated by transport-level pairing
-            authenticated = virtualNodeManager.connectAsGuest(this);
+            sessionStartResult = virtualNodeManager.connectAsGuest(this);
         }
 
-        if (!authenticated) {
-            LOG_WARN("Shared-node client rejected while starting config");
-            close();
+        if (sessionStartResult != VirtualNodeManager::SessionStartResult::Ok) {
+            LOG_WARN("Shared-node client rejected while starting config: %u", static_cast<unsigned>(sessionStartResult));
+            sendNotificationAndClose(meshtastic_LogRecord_Level_ERROR, 0,
+                                     virtualNodeManager.getSessionStartMessage(sessionStartResult));
             return;
         }
 #endif
@@ -149,6 +150,8 @@ void PhoneAPI::close()
         hasVirtualPacketForPhone = false;
         virtualPacketForPhone = meshtastic_MeshPacket_init_zero;
 #endif
+        closeAfterClientNotification = false;
+        closeAfterFromRadioRead = false;
         // Clear cached node info under lock because NimBLE callbacks can still be draining it.
         {
             concurrency::LockGuard guard(&nodeInfoMutex);
@@ -642,6 +645,15 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         pauseBluetoothLogging = false;
         // Do we have a message from the mesh or packet from the local device?
         LOG_DEBUG("FromRadio=STATE_SEND_PACKETS");
+        if (clientNotification) {
+            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
+            fromRadioScratch.clientNotification = *clientNotification;
+            if (closeAfterClientNotification) {
+                closeAfterFromRadioRead = true;
+                closeAfterClientNotification = false;
+            }
+            releaseClientNotification();
+        } else
 #ifdef MODE_SHARED_NODE
         if (hasVirtualPacketForPhone) {
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_packet_tag;
@@ -662,10 +674,6 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_xmodemPacket_tag;
             fromRadioScratch.xmodemPacket = xmodemPacketForPhone;
             xmodemPacketForPhone = meshtastic_XModem_init_zero;
-        } else if (clientNotification) {
-            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
-            fromRadioScratch.clientNotification = *clientNotification;
-            releaseClientNotification();
         } else if (packetForPhone) {
             printPacket("phone downloaded packet", packetForPhone);
 
@@ -811,6 +819,10 @@ bool PhoneAPI::available()
         prefetchNodeInfos();
         return true;
     case STATE_SEND_PACKETS: {
+        if (clientNotification) {
+            return true;
+        }
+
 #ifdef MODE_SHARED_NODE
         if (!hasVirtualPacketForPhone) {
             hasVirtualPacketForPhone = virtualNodeManager.popLocalPacketForApi(this, virtualPacketForPhone);
@@ -869,12 +881,61 @@ bool PhoneAPI::available()
 void PhoneAPI::sendNotification(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message)
 {
     meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
-    cn->has_reply_id = true;
+    if (!cn) {
+        return;
+    }
+    cn->has_reply_id = replyId != 0;
     cn->reply_id = replyId;
-    cn->level = meshtastic_LogRecord_Level_WARNING;
+    cn->level = level;
     cn->time = getValidTime(RTCQualityFromNet);
-    strncpy(cn->message, message, sizeof(cn->message));
-    service->sendClientNotification(cn);
+    if (message) {
+        strncpy(cn->message, message, sizeof(cn->message) - 1);
+        cn->message[sizeof(cn->message) - 1] = '\0';
+    }
+    queueClientNotification(cn, false);
+}
+
+void PhoneAPI::sendNotificationAndClose(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message)
+{
+    meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
+    if (!cn) {
+        onCloseAfterNotificationDelivered();
+        return;
+    }
+    cn->has_reply_id = replyId != 0;
+    cn->reply_id = replyId;
+    cn->level = level;
+    cn->time = getValidTime(RTCQualityFromNet);
+    if (message) {
+        strncpy(cn->message, message, sizeof(cn->message) - 1);
+        cn->message[sizeof(cn->message) - 1] = '\0';
+    }
+    if (state == STATE_SEND_NOTHING) {
+        state = STATE_SEND_PACKETS;
+    }
+    queueClientNotification(cn, true);
+}
+
+void PhoneAPI::onFromRadioReadComplete()
+{
+    if (!closeAfterFromRadioRead) {
+        return;
+    }
+
+    closeAfterFromRadioRead = false;
+    onCloseAfterNotificationDelivered();
+}
+
+void PhoneAPI::queueClientNotification(meshtastic_ClientNotification *notification, bool closeAfterDelivery)
+{
+    if (!notification) {
+        return;
+    }
+
+    releaseClientNotification();
+    clientNotification = notification;
+    closeAfterClientNotification = closeAfterDelivery;
+    onNowHasData(0);
 }
 
 bool PhoneAPI::wasSeenRecently(uint32_t id)

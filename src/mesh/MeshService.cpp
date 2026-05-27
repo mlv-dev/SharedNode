@@ -10,6 +10,7 @@
 #include "MessageStore.h"
 #include "NodeDB.h"
 #include "PowerFSM.h"
+#include "PhoneAPI.h"
 #include "RTC.h"
 #include "TypeConversions.h"
 #ifdef MODE_SHARED_NODE
@@ -215,13 +216,18 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p, PhoneAPI *sourcePhoneA
     // Let shared-node rewrite guest traffic before the normal mesh service
     // stamps rx_time and forwards it. A local delivery result means the
     // packet was queued directly to another PhoneAPI on this device.
-    VirtualNodeManager::OutgoingPacketDecision decision = virtualNodeManager.handleOutgoingPacket(p, sourcePhoneAPI);
-    if (decision == VirtualNodeManager::OUTGOING_REJECT) {
-        LOG_WARN("Shared-node policy rejected packet from API client");
+    VirtualNodeManager::OutgoingPacketResult result = virtualNodeManager.handleOutgoingPacket(p, sourcePhoneAPI);
+    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::Reject) {
+        LOG_WARN("Shared-node policy rejected packet from API client: %u", static_cast<unsigned>(result.rejectionReason));
+        if (sourcePhoneAPI) {
+            sourcePhoneAPI->sendNotification(
+                meshtastic_LogRecord_Level_WARNING, p.id,
+                virtualNodeManager.getOutgoingRejectionMessage(result.rejectionReason));
+        }
         sendRoutingErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &p);
         return;
     }
-    if (decision == VirtualNodeManager::OUTGOING_HANDLED_LOCAL) {
+    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::HandledLocal) {
         return;
     }
 #endif

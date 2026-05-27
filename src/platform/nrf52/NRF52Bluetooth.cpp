@@ -95,6 +95,14 @@ class BluetoothPhoneAPI : public PhoneAPI
     /// Check the current underlying physical link to see if the client is currently connected
     virtual bool checkIsConnected() override { return Bluefruit.connected(connHandle); }
 
+    virtual void onCloseAfterNotificationDelivered() override
+    {
+        if (Bluefruit.connected(connHandle)) {
+            LOG_INFO("BLE disconnect after final client notification");
+            Bluefruit.disconnect(connHandle);
+        }
+    }
+
   public:
     explicit BluetoothPhoneAPI(uint16_t connHandle_) : connHandle(connHandle_) { api_type = TYPE_BLE; }
 
@@ -233,6 +241,9 @@ void onFromRadioAuthorize(uint16_t conn_hdl, BLECharacteristic *chr, ble_gatts_e
         // LOG_INFO("Ignore successor read");
     }
     authorizeRead(conn_hdl);
+    if (phoneApi) {
+        phoneApi->onFromRadioReadComplete();
+    }
 }
 
 void onToRadioWrite(uint16_t conn_hdl, BLECharacteristic *chr, uint8_t *data, uint16_t len)

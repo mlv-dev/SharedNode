@@ -377,6 +377,14 @@ class BluetoothPhoneAPI : public PhoneAPI, public concurrency::OSThread
 #endif
     }
 
+    virtual void onCloseAfterNotificationDelivered() override
+    {
+        if (bleServer && connHandle != BLE_HS_CONN_HANDLE_NONE) {
+            LOG_INFO("BLE disconnect after final client notification");
+            bleServer->disconnect(connHandle);
+        }
+    }
+
     /// Check the current underlying physical link to see if the client is currently connected
     virtual bool checkIsConnected()
     {
@@ -666,6 +674,7 @@ class NimbleBluetoothFromRadioCallback : public NimBLECharacteristicCallbacks
         if (numBytes != 0) {
             phoneApi->setIntervalFromNow(0);
             concurrency::mainDelay.interrupt(); // wake up main loop if sleeping
+            phoneApi->onFromRadioReadComplete();
         }
     }
 };
