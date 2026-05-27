@@ -296,12 +296,12 @@ class NimbleBluetooth {
   };
   
   std::vector<ActiveConnection> connections;  // Множество подключений
-  static const int MAX_CONNECTIONS = 4;
+  static const int MAX_CLIENTS = 4;
   
   // Callback при новом подключении
   static int onConnect(uint16_t conn_handle, ble_gap_conn_desc *desc) {
     // Вместо замены старого подключения - добавить новое
-    if (connections.size() < MAX_CONNECTIONS) {
+    if (connections.size() < MAX_CLIENTS) {
       PhoneAPI* api = createNewPhoneAPI();
       connections.push_back({conn_handle, api});
     }

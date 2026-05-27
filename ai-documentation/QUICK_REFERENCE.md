@@ -64,7 +64,7 @@ if (!this->isAdmin() && isConfigModifyingCommand()) {
 ### В BLE инициализации (NimbleBluetooth)
 ```cpp
 // Вместо замены подключения - добавлять в лист
-if (connections.size() < MAX_CONNECTIONS) {
+if (connections.size() < MAX_CLIENTS) {
   PhoneAPI* newApi = createNewPhoneAPI();
   connections.push_back({conn_handle, newApi});
 }

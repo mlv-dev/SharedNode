@@ -333,7 +333,7 @@ class NodeDB
 #ifdef MODE_SHARED_NODE
     /// SharedNodePairingPolicy owns the slot semantics; NodeDB only snapshots
     /// durable fields to disk and strips live connection state when loading.
-    const std::array<SharedNode::ClientRecord, SharedNode::MAX_CONNECTIONS> &listClients() const { return clientRecords; }
+    const std::array<SharedNode::ClientRecord, SharedNode::MAX_CLIENTS> &listClients() const { return clientRecords; }
     void copySharedNodeRecords(SharedNode::ClientRecord *dest, size_t maxRecords) const;
     bool saveSharedNodeRecords(const SharedNode::ClientRecord *records, size_t recordCount);
 #endif
@@ -350,7 +350,7 @@ class NodeDB
 #ifdef MODE_SHARED_NODE
     /// Slot 0 is the admin record; later slots are guests. The array size is
     /// compile-time fixed so shared-node mode can run without heap allocation.
-    std::array<SharedNode::ClientRecord, SharedNode::MAX_CONNECTIONS> clientRecords{};
+    std::array<SharedNode::ClientRecord, SharedNode::MAX_CLIENTS> clientRecords{};
 #endif
 
     bool duplicateWarned = false;

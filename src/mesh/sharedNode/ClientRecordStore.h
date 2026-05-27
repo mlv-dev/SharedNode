@@ -17,7 +17,7 @@ namespace SharedNode::ClientRecordStore
 /**
  * @brief Fixed-size persisted SharedNode client table.
  */
-using Records = std::array<ClientRecord, MAX_CONNECTIONS>;
+using Records = std::array<ClientRecord, MAX_CLIENTS>;
 
 /**
  * @brief Resets all client records to the empty state.

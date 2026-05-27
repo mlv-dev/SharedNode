@@ -9,8 +9,8 @@
 #include <Arduino.h>
 #include <cstring>
 
-#ifndef SHARED_NODE_MAX_GUESTS
-#define SHARED_NODE_MAX_GUESTS 3
+#ifndef SHARED_NODE_MAX_CLIENTS
+#define SHARED_NODE_MAX_CLIENTS 5
 #endif
 
 /**
@@ -20,16 +20,16 @@ namespace SharedNode
 {
 
 /**
- * @brief Maximum number of guest clients allowed in shared-node mode.
- */
-static constexpr size_t MAX_GUESTS = SHARED_NODE_MAX_GUESTS;
-
-/**
  * @brief Maximum number of shared-node client connections.
  *
  * The value includes the admin slot plus all guest slots.
  */
-static constexpr size_t MAX_CONNECTIONS = SHARED_NODE_MAX_GUESTS + 1;
+static constexpr size_t MAX_CLIENTS = SHARED_NODE_MAX_CLIENTS;
+
+/**
+ * @brief Maximum number of guest clients allowed in shared-node mode.
+ */
+static constexpr size_t MAX_GUESTS = SHARED_NODE_MAX_CLIENTS - 1;
 
 /**
  * @brief Slot index reserved for the admin client.
@@ -95,7 +95,7 @@ enum class Role : uint8_t {
  */
 inline Role roleForSlot(uint8_t slotIndex)
 {
-    if (slotIndex == INVALID_SLOT || slotIndex >= MAX_CONNECTIONS) {
+    if (slotIndex == INVALID_SLOT || slotIndex >= MAX_CLIENTS) {
         return Role::UNKNOWN;
     }
     return slotIndex == ADMIN_SLOT ? Role::ADMIN : Role::GUEST;

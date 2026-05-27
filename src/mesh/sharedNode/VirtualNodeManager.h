@@ -263,12 +263,12 @@ class VirtualNodeManager
     /**
      * @brief Fixed-size table of active admin and guest sessions.
      */
-    std::array<SessionInfo, SharedNode::MAX_CONNECTIONS> sessions{};
+    std::array<SessionInfo, SharedNode::MAX_CLIENTS> sessions{};
 
     /**
      * @brief Predicate helper used to search the session table.
      */
-    StaticSlotTable<SessionInfo, SharedNode::MAX_CONNECTIONS> sessionSlots;
+    StaticSlotTable<SessionInfo, SharedNode::MAX_CLIENTS> sessionSlots;
 
     /**
      * @brief Allocates a free session slot.

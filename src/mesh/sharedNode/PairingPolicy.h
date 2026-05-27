@@ -465,12 +465,12 @@ class PairingPolicy
     /**
      * @brief Fixed-size table of persisted client records.
      */
-    std::array<ClientRecord, MAX_CONNECTIONS> records{};
+    std::array<ClientRecord, MAX_CLIENTS> records{};
 
     /**
      * @brief Predicate helper used to search the record table.
      */
-    StaticSlotTable<ClientRecord, MAX_CONNECTIONS> recordSlots;
+    StaticSlotTable<ClientRecord, MAX_CLIENTS> recordSlots;
 };
 
 /**

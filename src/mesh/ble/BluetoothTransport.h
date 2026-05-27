@@ -23,7 +23,7 @@ namespace bluetooth
 {
 
 #ifdef MODE_SHARED_NODE
-static constexpr size_t MAX_BLUETOOTH_CONNECTIONS = SharedNode::MAX_CONNECTIONS;
+static constexpr size_t MAX_BLUETOOTH_CONNECTIONS = SharedNode::MAX_CLIENTS;
 #else
 static constexpr size_t MAX_BLUETOOTH_CONNECTIONS = 1;
 #endif
