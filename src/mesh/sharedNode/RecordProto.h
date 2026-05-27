@@ -14,6 +14,16 @@
 namespace SharedNode
 {
 
+/**
+ * @brief Restores an in-memory shared-node client record from its persisted protobuf form.
+ *
+ * Runtime-only fields, such as the live BLE connection handle, are reset while
+ * durable identity fields are copied from storage. Invalid or incomplete key
+ * material is ignored and left zeroed in the destination record.
+ *
+ * @param record Destination client record to overwrite.
+ * @param raw Persisted protobuf record loaded from device state.
+ */
 inline void loadClientRecordFromProto(ClientRecord &record, const meshtastic_SharedNodeClient &raw)
 {
     record = ClientRecord{};
@@ -32,6 +42,18 @@ inline void loadClientRecordFromProto(ClientRecord &record, const meshtastic_Sha
     }
 }
 
+/**
+ * @brief Stores an in-memory shared-node client record into its persisted protobuf form.
+ *
+ * ACTIVE runtime state is persisted as NOT_ACTIVE because live connection
+ * handles are valid only until reboot or BLE disconnect. Virtual client key
+ * material can be omitted when callers need to persist slot metadata without
+ * writing identity keys.
+ *
+ * @param raw Destination protobuf record to overwrite.
+ * @param record Source client record.
+ * @param saveVirtualClientKeys true to persist the virtual client's public and private keys.
+ */
 inline void saveClientRecordToProto(meshtastic_SharedNodeClient &raw, const ClientRecord &record, bool saveVirtualClientKeys = true)
 {
     memset(&raw, 0, sizeof(raw));

@@ -266,6 +266,8 @@ bool PairingPolicy::regenerateVirtualClientKeys(uint32_t virtualNodeId)
 bool PairingPolicy::updateVirtualClientKeys(uint32_t virtualNodeId, const meshtastic_Config_SecurityConfig &security)
 {
     if (security.private_key.size != PKI_KEY_SIZE || memfll(security.private_key.bytes, 0, PKI_KEY_SIZE)) {
+        // Mobile clients commonly send an empty private key when they want the
+        // device to generate fresh key material for the virtual identity.
         return regenerateVirtualClientKeys(virtualNodeId);
     }
 
@@ -554,6 +556,8 @@ bool PairingPolicy::assignVirtualClientIdentityLocked(ClientRecord &record, uint
     }
 
     if (virtualNodeIdChanged || record.shortName[0] == '\0') {
+        // Default names are derived from the virtual node ID so reconnecting
+        // guests keep stable labels unless the user later customizes them.
         snprintf(record.shortName, sizeof(record.shortName), "G%02X", static_cast<unsigned>(virtualNodeId) & 0xff);
         changed = true;
     }
@@ -673,6 +677,8 @@ void PairingPolicy::disconnectSlotLocked(uint8_t slotIndex)
     record = SharedNode::ClientRecord{};
     record.connectionState = ConnectionState::DISCONNECTED;
     record.connHandle = 0;
+    // App-level disconnect releases the live session but keeps durable identity
+    // data so the same bonded phone can reconnect to its slot later.
     if (hadIdentity) {
         record.peerIdentity = peerIdentity.c_str();
     }

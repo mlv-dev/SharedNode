@@ -97,6 +97,8 @@ class BluetoothPhoneAPI : public PhoneAPI
 
     virtual void onCloseAfterNotificationDelivered() override
     {
+        // PhoneAPI calls this only after the final FromRadio read was handed to
+        // SoftDevice, so the rejection reason has a chance to reach the app.
         if (Bluefruit.connected(connHandle)) {
             LOG_INFO("BLE disconnect after final client notification");
             Bluefruit.disconnect(connHandle);
@@ -242,6 +244,8 @@ void onFromRadioAuthorize(uint16_t conn_hdl, BLECharacteristic *chr, ble_gatts_e
     }
     authorizeRead(conn_hdl);
     if (phoneApi) {
+        // Complete any deferred close after SoftDevice has accepted the read
+        // response for this connection.
         phoneApi->onFromRadioReadComplete();
     }
 }

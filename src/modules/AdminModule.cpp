@@ -81,6 +81,8 @@ AdminModule::SharedNodeAdminContext AdminModule::getSharedNodeAdminContext(const
         return context;
     }
 
+    // MeshService rewrites allowed guest admin packets to target the physical
+    // node, while packet.from remains the virtual identity used for scoping.
     const uint8_t slot = virtualNodeManager.sharedNodeSlotForVirtualNode(mp.from);
     if (slot == SharedNode::INVALID_SLOT) {
         return context;
@@ -107,6 +109,8 @@ bool AdminModule::sharedNodeAdminMessageAllowed(const SharedNodeAdminContext &co
         return false;
     }
 
+    // Guests may manage only their own profile and virtual key material. All
+    // physical-node settings stay reserved for the shared-node admin.
     switch (request->which_payload_variant) {
     case meshtastic_AdminMessage_get_owner_request_tag:
     case meshtastic_AdminMessage_set_owner_tag:
@@ -156,7 +160,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
                      sharedNodeContext.virtualNodeId);
             virtualNodeManager.sendNotificationToVirtualNode(
                 sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
-                virtualNodeManager.getOutgoingRejectionMessage(VirtualNodeManager::OutgoingRejectionReason::AdminOnly));
+                virtualNodeManager.getOutgoingRejectionMessage(VirtualNodeManager::OutgoingRejectionReason::ADMIN_ONLY));
             myReply = allocErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &mp);
             return handled;
         }
@@ -768,6 +772,8 @@ bool AdminModule::handleSetVirtualSecurityConfig(const SharedNodeAdminContext &c
 
     const meshtastic_Config_SecurityConfig &requestedSecurity = virtualConfig.payload_variant.security;
     if (context.role == SharedNode::Role::GUEST) {
+        // Guests cannot import arbitrary admin/security state; an app request
+        // to set security becomes a scoped regeneration of their own keys.
         return SharedNode::pairingPolicy.regenerateVirtualClientKeys(context.virtualNodeId);
     }
 
@@ -779,6 +785,8 @@ bool AdminModule::handleSetVirtualSecurityConfig(const SharedNodeAdminContext &c
         return false;
     }
 
+    // Admin-scoped virtual requests may update shared security fields, but the
+    // physical node keypair must remain the actual device identity.
     const auto physicalPublicKey = config.security.public_key;
     const auto physicalPrivateKey = config.security.private_key;
     const bool requiresReboot = config.security.debug_log_api_enabled != requestedSecurity.debug_log_api_enabled ||
@@ -1277,6 +1285,8 @@ void AdminModule::handleGetVirtualSecurityConfig(const meshtastic_MeshPacket &re
 
     meshtastic_AdminMessage res = meshtastic_AdminMessage_init_default;
     res.get_config_response.which_payload_variant = meshtastic_Config_security_tag;
+    // Admin callers need admin_key[] for real administration. Guest callers get
+    // the same config shape with keys scoped to their virtual identity only.
     if (!SharedNode::pairingPolicy.buildVirtualSecurityConfig(virtualNodeId, res.get_config_response.payload_variant.security,
                                                               includeAdminKeys)) {
         myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &req);

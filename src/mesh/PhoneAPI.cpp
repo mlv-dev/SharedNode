@@ -59,7 +59,7 @@ void PhoneAPI::handleStartConfig()
     // Must be before setting state (because state is how we know !connected)
     if (!isConnected()) {
 #ifdef MODE_SHARED_NODE
-        VirtualNodeManager::SessionStartResult sessionStartResult = VirtualNodeManager::SessionStartResult::UnknownRole;
+        VirtualNodeManager::SessionStartResult sessionStartResult = VirtualNodeManager::SessionStartResult::UNKNOWN_ROLE;
         // Transport layer has already chosen the slot via SharedNodePairingPolicy.
         // Now we just need to register the session in VirtualNodeManager.
         if (isAdmin()) {
@@ -70,8 +70,10 @@ void PhoneAPI::handleStartConfig()
             sessionStartResult = virtualNodeManager.connectAsGuest(this);
         }
 
-        if (sessionStartResult != VirtualNodeManager::SessionStartResult::Ok) {
+        if (sessionStartResult != VirtualNodeManager::SessionStartResult::OK) {
             LOG_WARN("Shared-node client rejected while starting config: %u", static_cast<unsigned>(sessionStartResult));
+            // The app has not reached steady-state yet, so queue a local
+            // notification and let the transport close only after it is read.
             sendNotificationAndClose(meshtastic_LogRecord_Level_ERROR, 0,
                                      virtualNodeManager.getSessionStartMessage(sessionStartResult));
             return;
@@ -646,6 +648,8 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         // Do we have a message from the mesh or packet from the local device?
         LOG_DEBUG("FromRadio=STATE_SEND_PACKETS");
         if (clientNotification) {
+            // Local notifications are served before virtual or global queues so
+            // SharedNode guests still receive their own permission/limit errors.
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
             fromRadioScratch.clientNotification = *clientNotification;
             if (closeAfterClientNotification) {
@@ -820,6 +824,8 @@ bool PhoneAPI::available()
         return true;
     case STATE_SEND_PACKETS: {
         if (clientNotification) {
+            // Per-connection notifications bypass the guest filter below; the
+            // global MeshService notification queue remains skipped by guests.
             return true;
         }
 
@@ -880,6 +886,8 @@ bool PhoneAPI::available()
 
 void PhoneAPI::sendNotification(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message)
 {
+    // Queue locally instead of using MeshService's global phone queue. SharedNode
+    // errors must go back to the exact API connection that caused them.
     meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
     if (!cn) {
         return;
@@ -899,6 +907,8 @@ void PhoneAPI::sendNotificationAndClose(meshtastic_LogRecord_Level level, uint32
 {
     meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
     if (!cn) {
+        // If the pool is exhausted there is no payload to deliver, so close the
+        // rejected connection immediately instead of leaving it half-open.
         onCloseAfterNotificationDelivered();
         return;
     }
@@ -922,6 +932,8 @@ void PhoneAPI::onFromRadioReadComplete()
         return;
     }
 
+    // At this point getFromRadio() has encoded the final notification and the
+    // transport callback has handed the bytes to BLE/API, so it is safe to drop.
     closeAfterFromRadioRead = false;
     onCloseAfterNotificationDelivered();
 }
@@ -935,6 +947,8 @@ void PhoneAPI::queueClientNotification(meshtastic_ClientNotification *notificati
     releaseClientNotification();
     clientNotification = notification;
     closeAfterClientNotification = closeAfterDelivery;
+    // Wake only this transport; local notifications should not advertise data
+    // on other PhoneAPI instances.
     onNowHasData(0);
 }
 

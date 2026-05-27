@@ -153,6 +153,8 @@ void enforceSharedNodePairingMode()
 
 void rememberKnownConnection(uint16_t connHandle, const SharedNode::PeerIdentity &identity)
 {
+    // Reconnects can skip the passkey path when the backend already knows the
+    // peer identity; bind the live handle back to its durable slot.
     const uint8_t knownSlot = SharedNode::pairingPolicy.slotForIdentity(identity);
     if (knownSlot != SharedNode::INVALID_SLOT) {
         SharedNode::pairingPolicy.rememberConnectionSlot(connHandle, identity, knownSlot);
@@ -161,6 +163,8 @@ void rememberKnownConnection(uint16_t connHandle, const SharedNode::PeerIdentity
 
 uint8_t resolveConnectionSlot(uint16_t connHandle, const SharedNode::PeerIdentity &identity)
 {
+    // Authentication completion is where BLE stacks expose the stable identity
+    // needed to turn a pending passkey slot into a durable SharedNode record.
     return SharedNode::pairingPolicy.resolveSlotForConnection(connHandle, identity);
 }
 

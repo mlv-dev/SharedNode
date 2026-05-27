@@ -414,9 +414,9 @@ static void test_virtual_node_manager_admin_duplicate_has_reason()
     adminA.setSharedNodeSlot(SharedNode::ADMIN_SLOT);
     adminB.setSharedNodeSlot(SharedNode::ADMIN_SLOT);
 
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::OK),
                             static_cast<uint8_t>(manager.connectAsAdmin(&adminA)));
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::AdminAlreadyConnected),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::ADMIN_ALREADY_CONNECTED),
                             static_cast<uint8_t>(manager.connectAsAdmin(&adminB)));
 }
 
@@ -432,12 +432,12 @@ static void test_virtual_node_manager_guest_limit_has_reason()
 
     for (size_t i = 0; i < SharedNode::MAX_GUESTS; i++) {
         guests[i].setSharedNodeSlot(guestSlot);
-        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::OK),
                                 static_cast<uint8_t>(manager.connectAsGuest(&guests[i])));
     }
 
     guests[SharedNode::MAX_GUESTS].setSharedNodeSlot(guestSlot);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::GuestLimitReached),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::GUEST_LIMIT_REACHED),
                             static_cast<uint8_t>(manager.connectAsGuest(&guests[SharedNode::MAX_GUESTS])));
 }
 
@@ -447,7 +447,7 @@ static void test_virtual_node_manager_invalid_guest_slot_has_reason()
     TestPhoneAPI guest;
     guest.setSharedNodeSlot(SharedNode::INVALID_SLOT);
 
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::UnknownRole),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::UNKNOWN_ROLE),
                             static_cast<uint8_t>(manager.connectAsGuest(&guest)));
 }
 
@@ -461,7 +461,7 @@ static void test_virtual_node_manager_rejects_guest_admin_for_other_profile_with
     const uint8_t guestSlot = SharedNode::pairingPolicy.resolveSlotForConnection(2, peerIdentity("bf:guest-reject"));
     TEST_ASSERT_NOT_EQUAL_UINT8(SharedNode::INVALID_SLOT, guestSlot);
     guest.setSharedNodeSlot(guestSlot);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::Ok),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::SessionStartResult::OK),
                             static_cast<uint8_t>(manager.connectAsGuest(&guest)));
 
     meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_zero;
@@ -470,9 +470,9 @@ static void test_virtual_node_manager_rejects_guest_admin_for_other_profile_with
     packet.to = 0x12345678;
 
     const VirtualNodeManager::OutgoingPacketResult result = manager.handleOutgoingPacket(packet, &guest);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingPacketDecision::Reject),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingPacketDecision::REJECT),
                             static_cast<uint8_t>(result.decision));
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingRejectionReason::NotOwnProfile),
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(VirtualNodeManager::OutgoingRejectionReason::NOT_OWN_PROFILE),
                             static_cast<uint8_t>(result.rejectionReason));
 }
 

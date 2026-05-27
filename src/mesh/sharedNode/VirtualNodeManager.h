@@ -71,47 +71,47 @@ class VirtualNodeManager
       /**
        * @brief Allow the packet to continue to the radio path.
        */
-      AllowRadio = 0,
+      ALLOW_RADIO = 0,
 
       /**
        * @brief Reject the packet before it reaches the radio path.
        */
-      Reject = 1,
+      REJECT = 1,
 
       /**
        * @brief Packet was queued for another local virtual node.
        */
-      HandledLocal = 2,
+      HANDLED_LOCAL = 2,
     };
 
     /**
      * @brief Result returned when registering an API session.
      */
     enum class SessionStartResult : uint8_t {
-        Ok = 0,
-        UnknownRole = 1,
-        AdminAlreadyConnected = 2,
-        GuestLimitReached = 3,
-        TableFull = 4,
-        GuestIdentityUnavailable = 5,
+        OK = 0,
+        UNKNOWN_ROLE = 1,
+        ADMIN_ALREADY_CONNECTED = 2,
+        GUEST_LIMIT_REACHED = 3,
+        TABLE_FULL = 4,
+        GUEST_IDENTITY_UNAVAILABLE = 5,
     };
 
     /**
      * @brief User-facing reason for a rejected outgoing packet.
      */
     enum class OutgoingRejectionReason : uint8_t {
-        None = 0,
-        NotAuthorized = 1,
-        AdminOnly = 2,
-        NotOwnProfile = 3,
+        NONE = 0,
+        NOT_AUTHORIZED = 1,
+        ADMIN_ONLY = 2,
+        NOT_OWN_PROFILE = 3,
     };
 
     /**
      * @brief Result returned after processing a client-originated packet.
      */
     struct OutgoingPacketResult {
-        OutgoingPacketDecision decision = OutgoingPacketDecision::AllowRadio;
-        OutgoingRejectionReason rejectionReason = OutgoingRejectionReason::None;
+        OutgoingPacketDecision decision = OutgoingPacketDecision::ALLOW_RADIO;
+        OutgoingRejectionReason rejectionReason = OutgoingRejectionReason::NONE;
     };
 
     /**

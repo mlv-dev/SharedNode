@@ -379,6 +379,8 @@ class BluetoothPhoneAPI : public PhoneAPI, public concurrency::OSThread
 
     virtual void onCloseAfterNotificationDelivered() override
     {
+        // PhoneAPI calls this only after the final FromRadio read was handed to
+        // NimBLE, so the rejection reason has a chance to reach the app.
         if (bleServer && connHandle != BLE_HS_CONN_HANDLE_NONE) {
             LOG_INFO("BLE disconnect after final client notification");
             bleServer->disconnect(connHandle);
@@ -674,6 +676,8 @@ class NimbleBluetoothFromRadioCallback : public NimBLECharacteristicCallbacks
         if (numBytes != 0) {
             phoneApi->setIntervalFromNow(0);
             concurrency::mainDelay.interrupt(); // wake up main loop if sleeping
+            // Complete any deferred close after NimBLE has accepted the read
+            // value for this connection.
             phoneApi->onFromRadioReadComplete();
         }
     }

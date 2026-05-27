@@ -217,9 +217,11 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p, PhoneAPI *sourcePhoneA
     // stamps rx_time and forwards it. A local delivery result means the
     // packet was queued directly to another PhoneAPI on this device.
     VirtualNodeManager::OutgoingPacketResult result = virtualNodeManager.handleOutgoingPacket(p, sourcePhoneAPI);
-    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::Reject) {
+    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::REJECT) {
         LOG_WARN("Shared-node policy rejected packet from API client: %u", static_cast<unsigned>(result.rejectionReason));
         if (sourcePhoneAPI) {
+            // Routing errors keep protocol behavior intact; the local
+            // notification gives the exact app connection a readable reason.
             sourcePhoneAPI->sendNotification(
                 meshtastic_LogRecord_Level_WARNING, p.id,
                 virtualNodeManager.getOutgoingRejectionMessage(result.rejectionReason));
@@ -227,7 +229,7 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p, PhoneAPI *sourcePhoneA
         sendRoutingErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &p);
         return;
     }
-    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::HandledLocal) {
+    if (result.decision == VirtualNodeManager::OutgoingPacketDecision::HANDLED_LOCAL) {
         return;
     }
 #endif

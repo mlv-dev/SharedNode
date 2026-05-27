@@ -34,18 +34,18 @@ VirtualNodeManager::VirtualNodeManager() : sessionSlots(sessions) {}
 VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsAdmin(PhoneAPI *api)
 {
     if (!api) {
-        return SessionStartResult::UnknownRole;
+        return SessionStartResult::UNKNOWN_ROLE;
     }
 
     concurrency::LockGuard guard(&sessionLock);
     if (SharedNode::roleForSlot(api->getSharedNodeSlot()) != SharedNode::Role::ADMIN) {
-        return SessionStartResult::UnknownRole;
+        return SessionStartResult::UNKNOWN_ROLE;
     }
 
     if (hasAdminLocked(api)) {
         // The admin is the real local node identity; allowing two active admin
         // PhoneAPI sessions would make local admin operations ambiguous.
-        return SessionStartResult::AdminAlreadyConnected;
+        return SessionStartResult::ADMIN_ALREADY_CONNECTED;
     }
 
     SessionInfo *session = findSessionByApiLocked(api);
@@ -53,7 +53,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsAdmin(PhoneA
         session = allocateSessionLocked();
     }
     if (!session) {
-        return SessionStartResult::TableFull;
+        return SessionStartResult::TABLE_FULL;
     }
 
     session->used = true;
@@ -61,19 +61,19 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsAdmin(PhoneA
     session->sharedNodeSlot = SharedNode::ADMIN_SLOT;
     // Admin traffic uses the physical node number, not a virtual guest ID.
     session->virtualNodeId = nodeDB ? nodeDB->getNodeNum() : 0;
-    return SessionStartResult::Ok;
+    return SessionStartResult::OK;
 }
 
 VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneAPI *api)
 {
     if (!api) {
-        return SessionStartResult::UnknownRole;
+        return SessionStartResult::UNKNOWN_ROLE;
     }
 
     concurrency::LockGuard guard(&sessionLock);
     const uint8_t sharedNodeSlot = api->getSharedNodeSlot();
     if (SharedNode::roleForSlot(sharedNodeSlot) != SharedNode::Role::GUEST) {
-        return SessionStartResult::UnknownRole;
+        return SessionStartResult::UNKNOWN_ROLE;
     }
 
     SessionInfo *session = findSessionByApiLocked(api);
@@ -85,7 +85,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
             }
         }
         if (guestCount >= SharedNode::MAX_GUESTS) {
-            return SessionStartResult::GuestLimitReached;
+            return SessionStartResult::GUEST_LIMIT_REACHED;
         }
         // Allocate a new live session only after enforcing the configured guest
         // limit; the pairing policy may have more persisted slots than are
@@ -93,7 +93,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
         session = allocateSessionLocked();
     }
     if (!session) {
-        return SessionStartResult::TableFull;
+        return SessionStartResult::TABLE_FULL;
     }
 
     NodeNum virtualNodeId = SharedNode::pairingPolicy.virtualNodeIdForSlot(sharedNodeSlot);
@@ -103,7 +103,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
         virtualNodeId = allocateVirtualNodeIdLocked();
         if (!SharedNode::pairingPolicy.setVirtualNodeIdForSlot(sharedNodeSlot, virtualNodeId)) {
             *session = SessionInfo{};
-            return SessionStartResult::GuestIdentityUnavailable;
+            return SessionStartResult::GUEST_IDENTITY_UNAVAILABLE;
         }
     }
 
@@ -111,7 +111,7 @@ VirtualNodeManager::SessionStartResult VirtualNodeManager::connectAsGuest(PhoneA
     session->api = api;
     session->sharedNodeSlot = sharedNodeSlot;
     session->virtualNodeId = virtualNodeId;
-    return SessionStartResult::Ok;
+    return SessionStartResult::OK;
 }
 
 void VirtualNodeManager::disconnect(PhoneAPI *api)
@@ -133,13 +133,13 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
     // Non-PhoneAPI callers are device-originated or internal mesh paths. They
     // are already trusted and do not have a per-client shared-node session.
     if (sourceApi == nullptr) {
-        return {OutgoingPacketDecision::AllowRadio, OutgoingRejectionReason::None};
+        return {OutgoingPacketDecision::ALLOW_RADIO, OutgoingRejectionReason::NONE};
     }
 
     concurrency::LockGuard guard(&sessionLock);
     SessionInfo *session = findSessionByApiLocked(sourceApi);
     if (!session) {
-        return {OutgoingPacketDecision::Reject, OutgoingRejectionReason::NotAuthorized};
+        return {OutgoingPacketDecision::REJECT, OutgoingRejectionReason::NOT_AUTHORIZED};
     }
 
     const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
@@ -159,7 +159,7 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
     if (isAdminPacket && sourceUsesVirtualIdentity) {
         const bool targetsOwnVirtualNode = packet.to == session->virtualNodeId;
         if (isBroadcast(packet.to) || !(targetsPhysicalLocalNode || targetsOwnVirtualNode)) {
-            return {OutgoingPacketDecision::Reject, OutgoingRejectionReason::NotOwnProfile};
+            return {OutgoingPacketDecision::REJECT, OutgoingRejectionReason::NOT_OWN_PROFILE};
         }
 
         // Virtual clients may use ADMIN_APP only as a local control path.
@@ -169,14 +169,14 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
         packet.transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_API;
         packet.next_hop = NO_NEXT_HOP_PREFERENCE;
         packet.relay_node = NO_RELAY_NODE;
-        return {OutgoingPacketDecision::AllowRadio, OutgoingRejectionReason::None};
+        return {OutgoingPacketDecision::ALLOW_RADIO, OutgoingRejectionReason::NONE};
     }
 
     if (isAdminPacket && !sourceIsAdmin &&
         (isBroadcast(packet.to) || targetsPhysicalLocalNode || targetsLocalVirtualNode)) {
         // Guests can send normal mesh traffic, but admin commands are either
         // handled by the scoped virtual path above or rejected.
-        return {OutgoingPacketDecision::Reject, OutgoingRejectionReason::AdminOnly};
+        return {OutgoingPacketDecision::REJECT, OutgoingRejectionReason::ADMIN_ONLY};
     }
 
     // Direct messages between guests on the same device should not consume
@@ -191,7 +191,7 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
             localPacket.relay_node = NO_RELAY_NODE;
 
             enqueueLocalPacketLocked(localSession->api, localPacket);
-            return {OutgoingPacketDecision::HandledLocal, OutgoingRejectionReason::None};
+            return {OutgoingPacketDecision::HANDLED_LOCAL, OutgoingRejectionReason::NONE};
         }
     }
 
@@ -201,7 +201,7 @@ VirtualNodeManager::OutgoingPacketResult VirtualNodeManager::handleOutgoingPacke
         packet.from = session->virtualNodeId;
     }
 
-    return {OutgoingPacketDecision::AllowRadio, OutgoingRejectionReason::None};
+    return {OutgoingPacketDecision::ALLOW_RADIO, OutgoingRejectionReason::NONE};
 }
 
 bool VirtualNodeManager::sendNotificationToVirtualNode(NodeNum nodeNum, meshtastic_LogRecord_Level level, uint32_t replyId,
@@ -220,6 +220,8 @@ bool VirtualNodeManager::sendNotificationToVirtualNode(NodeNum nodeNum, meshtast
         return false;
     }
 
+    // Notify outside sessionLock because PhoneAPI::sendNotification() can wake
+    // transport callbacks that may ask the manager for more local packets.
     api->sendNotification(level, replyId, message);
     return true;
 }
@@ -227,16 +229,16 @@ bool VirtualNodeManager::sendNotificationToVirtualNode(NodeNum nodeNum, meshtast
 const char *VirtualNodeManager::getSessionStartMessage(SessionStartResult result)
 {
     switch (result) {
-    case SessionStartResult::Ok:
+    case SessionStartResult::OK:
         return nullptr;
-    case SessionStartResult::AdminAlreadyConnected:
+    case SessionStartResult::ADMIN_ALREADY_CONNECTED:
         return "The shared node admin is already connected.";
-    case SessionStartResult::GuestLimitReached:
-    case SessionStartResult::TableFull:
+    case SessionStartResult::GUEST_LIMIT_REACHED:
+    case SessionStartResult::TABLE_FULL:
         return "Shared node is full. Ask the admin to free a guest slot.";
-    case SessionStartResult::GuestIdentityUnavailable:
+    case SessionStartResult::GUEST_IDENTITY_UNAVAILABLE:
         return "Could not prepare your shared-node identity. Ask the admin to reconnect you.";
-    case SessionStartResult::UnknownRole:
+    case SessionStartResult::UNKNOWN_ROLE:
     default:
         return "This phone is not authorized for this shared node.";
     }
@@ -245,13 +247,13 @@ const char *VirtualNodeManager::getSessionStartMessage(SessionStartResult result
 const char *VirtualNodeManager::getOutgoingRejectionMessage(OutgoingRejectionReason reason)
 {
     switch (reason) {
-    case OutgoingRejectionReason::AdminOnly:
+    case OutgoingRejectionReason::ADMIN_ONLY:
         return "Only the shared node admin can change this setting.";
-    case OutgoingRejectionReason::NotOwnProfile:
+    case OutgoingRejectionReason::NOT_OWN_PROFILE:
         return "You can only change your own shared-node profile.";
-    case OutgoingRejectionReason::NotAuthorized:
+    case OutgoingRejectionReason::NOT_AUTHORIZED:
         return "This phone is not authorized for this shared node.";
-    case OutgoingRejectionReason::None:
+    case OutgoingRejectionReason::NONE:
     default:
         return nullptr;
     }
@@ -273,7 +275,8 @@ void VirtualNodeManager::handleIncomingPacket(meshtastic_MeshPacket &packet)
 
         if (isBroadcast(packet.to) || packet.to == session.virtualNodeId) {
             // Guest sessions receive broadcast mesh traffic plus unicast
-            // traffic addressed to their virtual node number.
+            // traffic addressed to their virtual node number. They do not read
+            // the physical node's global phone queue.
             enqueueLocalPacketLocked(session.api, packet);
         }
     }
