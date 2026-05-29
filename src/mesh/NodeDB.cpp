@@ -21,10 +21,15 @@
 #include "error.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
+#ifdef MODE_SHARED_NODE
+#include "mesh/sharedNode/ClientRecordStore.h"
+#include "mesh/sharedNode/PairingPolicy.h"
+#endif
 #include "meshUtils.h"
 #include "modules/NeighborInfoModule.h"
 #include <ErriezCRC32.h>
 #include <algorithm>
+#include <cstring>
 #include <pb_decode.h>
 #include <pb_encode.h>
 #include <power/PowerHAL.h>
@@ -519,6 +524,9 @@ bool NodeDB::factoryReset(bool eraseBleBonds)
     saveToDisk();
     if (eraseBleBonds) {
         LOG_INFO("Erase BLE bonds");
+#ifdef MODE_SHARED_NODE
+        SharedNode::pairingPolicy.clearAllKnownClients();
+#endif
 #ifdef ARCH_ESP32
         // This will erase what's in NVS including ssl keys, persistent variables and ble pairing
         nvs_flash_erase();
@@ -541,6 +549,9 @@ void NodeDB::installDefaultNodeDatabase()
     nodeDatabase.nodes = std::vector<meshtastic_NodeInfoLite>(MAX_NUM_NODES);
     numMeshNodes = 0;
     meshNodes = &nodeDatabase.nodes;
+#ifdef MODE_SHARED_NODE
+    SharedNode::ClientRecordStore::reset(clientRecords);
+#endif
 }
 
 void NodeDB::installDefaultConfig(bool preserveKey = false)
@@ -713,13 +724,23 @@ void NodeDB::installDefaultConfig(bool preserveKey = false)
     bool hasScreen = screen_found.port != ScanI2C::I2CPort::NO_I2C;
 #endif
 
+#ifdef MODE_SHARED_NODE
+    // Shared-node pairing must show a fresh admin passkey while keeping the
+    // configured fixed PIN available as the guest PIN.
+    config.bluetooth.mode = meshtastic_Config_BluetoothConfig_PairingMode_RANDOM_PIN;
+    #ifdef MESHTASTIC_SHARED_NODE_GUEST_PIN
+        config.bluetooth.fixed_pin = MESHTASTIC_SHARED_NODE_GUEST_PIN;
+    #endif
+#else
 #ifdef USERPREFS_FIXED_BLUETOOTH
     config.bluetooth.fixed_pin = USERPREFS_FIXED_BLUETOOTH;
     config.bluetooth.mode = meshtastic_Config_BluetoothConfig_PairingMode_FIXED_PIN;
 #else
     config.bluetooth.mode = hasScreen ? meshtastic_Config_BluetoothConfig_PairingMode_RANDOM_PIN
-                                      : meshtastic_Config_BluetoothConfig_PairingMode_FIXED_PIN;
+                                    : meshtastic_Config_BluetoothConfig_PairingMode_FIXED_PIN;
 #endif
+#endif
+
     // for backward compat, default position flags are ALT+MSL
     config.position.position_flags =
         (meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE | meshtastic_Config_PositionConfig_PositionFlags_ALTITUDE_MSL |
@@ -1395,6 +1416,12 @@ void NodeDB::loadFromDisk()
         LOG_INFO("Loaded UIConfig");
     }
 
+    // Guest/admin pairing records are stored beside the normal NodeDB but are
+    // loaded after preferences so the policy can resolve stable BLE identities.
+#ifdef MODE_SHARED_NODE
+    loadClientRecords();
+#endif
+
     // 2.4.X - configuration migration to update new default intervals
     if (moduleConfig.version < 23) {
         LOG_DEBUG("ModuleConfig version %d is stale, upgrading to new default intervals", moduleConfig.version);
@@ -1431,6 +1458,49 @@ void NodeDB::loadFromDisk()
 
 #endif
 }
+
+#ifdef MODE_SHARED_NODE
+void NodeDB::copySharedNodeRecords(SharedNode::ClientRecord *dest, size_t maxRecords) const
+{
+    SharedNode::ClientRecordStore::copyForPolicy(clientRecords, dest, maxRecords);
+}
+
+bool NodeDB::saveSharedNodeRecords(const SharedNode::ClientRecord *records, size_t recordCount)
+{
+    if (!records) {
+        return false;
+    }
+
+    SharedNode::ClientRecordStore::replaceFromPolicy(clientRecords, records, recordCount);
+    return saveClientRecords();
+}
+
+void NodeDB::loadClientRecords()
+{
+    SharedNode::ClientRecordStore::reset(clientRecords);
+
+    meshtastic_SharedNodeClientStore store = meshtastic_SharedNodeClientStore_init_zero;
+    if (loadProto(clientRecordsFileName, meshtastic_SharedNodeClientStore_size, sizeof(meshtastic_SharedNodeClientStore),
+                  &meshtastic_SharedNodeClientStore_msg, &store) != LoadFileResult::LOAD_SUCCESS) {
+        return;
+    }
+
+    SharedNode::ClientRecordStore::loadFromProto(clientRecords, store);
+}
+
+bool NodeDB::saveClientRecords()
+{
+    if (!powerHAL_isPowerLevelSafe()) {
+        LOG_ERROR("Error: trying to saveClientRecords() on unsafe device power level.");
+        return false;
+    }
+
+    meshtastic_SharedNodeClientStore store = meshtastic_SharedNodeClientStore_init_zero;
+    SharedNode::ClientRecordStore::saveToProto(clientRecords, store);
+
+    return saveProto(clientRecordsFileName, meshtastic_SharedNodeClientStore_size, &meshtastic_SharedNodeClientStore_msg, &store);
+}
+#endif
 
 /** Save a protobuf from a file, return true for success */
 bool NodeDB::saveProto(const char *filename, size_t protoSize, const pb_msgdesc_t *fields, const void *dest_struct,
@@ -1584,6 +1654,11 @@ bool NodeDB::saveToDiskNoRetry(int saveWhat)
 
     if (saveWhat & SEGMENT_NODEDATABASE) {
         success &= saveNodeDatabaseToDisk();
+#ifdef MODE_SHARED_NODE
+        // Guest records are logically part of local node identity state, but
+        // they live in their own file to keep the normal NodeDB compact.
+        success &= saveClientRecords();
+#endif
     }
 
     return success;

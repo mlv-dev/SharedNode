@@ -3,6 +3,9 @@
 #include <esp_ota_ops.h>
 #endif
 #include "ProtobufModule.h"
+#ifdef MODE_SHARED_NODE
+#include "MeshTypes.h"
+#endif
 #include <sys/types.h>
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
@@ -55,6 +58,24 @@ class AdminModule : public ProtobufModule<meshtastic_AdminMessage>, public Obser
     void handleGetDeviceConnectionStatus(const meshtastic_MeshPacket &req);
     void handleGetNodeRemoteHardwarePins(const meshtastic_MeshPacket &req);
     void handleGetDeviceUIConfig(const meshtastic_MeshPacket &req);
+#ifdef MODE_SHARED_NODE
+    /**
+     * @brief Sends the persisted virtual owner profile for a local SharedNode client.
+     *
+     * @param req Original admin request packet.
+     * @param virtualNodeId Local virtual node ID whose owner profile should be returned.
+     */
+    void handleGetVirtualOwner(const meshtastic_MeshPacket &req, NodeNum virtualNodeId);
+
+    /**
+     * @brief Sends the virtual security config for a local SharedNode client.
+     *
+     * @param req Original admin request packet.
+     * @param virtualNodeId Local virtual node ID whose security config should be returned.
+     * @param includeAdminKeys true when admin keys may be included in the response.
+     */
+    void handleGetVirtualSecurityConfig(const meshtastic_MeshPacket &req, NodeNum virtualNodeId, bool includeAdminKeys);
+#endif
     /**
      * Setters
      */

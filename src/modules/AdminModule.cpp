@@ -26,6 +26,11 @@
 #include "MeshRadio.h"
 #include "RadioInterface.h"
 #include "TypeConversions.h"
+#ifdef MODE_SHARED_NODE
+#include "mesh/sharedNode/AdminPolicy.h"
+#include "mesh/sharedNode/PairingPolicy.h"
+#include "mesh/sharedNode/VirtualNodeManager.h"
+#endif
 #include "mesh/RadioLibInterface.h"
 
 #if !MESHTASTIC_EXCLUDE_MQTT
@@ -80,11 +85,30 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
     if (mp.which_payload_variant != meshtastic_MeshPacket_decoded_tag) {
         return handled;
     }
+#ifdef MODE_SHARED_NODE
+    const SharedNode::AdminPolicy::Context sharedNodeContext = SharedNode::AdminPolicy::contextForPacket(mp);
+    const bool isSharedNodeLocalVirtual = sharedNodeContext.isLocalVirtual;
+    if (isSharedNodeLocalVirtual) {
+        fromOthers = false;
+    }
+#endif
     meshtastic_Channel *ch = &channels.getByIndex(mp.channel);
     // Could tighten this up further by tracking the last public_key we went an AdminMessage request to
     // and only allowing responses from that remote.
     if (messageIsResponse(r)) {
         LOG_DEBUG("Allow admin response message");
+#ifdef MODE_SHARED_NODE
+    } else if (isSharedNodeLocalVirtual) {
+        if (!SharedNode::AdminPolicy::isMessageAllowed(sharedNodeContext, r)) {
+            LOG_INFO("Reject scoped shared-node admin payload %i from virtual node 0x%x", r->which_payload_variant,
+                     sharedNodeContext.virtualNodeId);
+            virtualNodeManager.sendNotificationToVirtualNode(
+                sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                SharedNode::AdminPolicy::failureMessage(SharedNode::AdminPolicy::FailureReason::ADMIN_ONLY));
+            myReply = allocErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &mp);
+            return handled;
+        }
+#endif
     } else if (mp.from == 0) {
         if (config.security.is_managed) {
             LOG_INFO("Ignore local admin payload because is_managed");
@@ -132,7 +156,11 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
 
     // all of the get and set messages, including those for other modules, flow through here first.
     // any message that changes state, we want to check the passkey for
-    if (mp.from != 0 && !messageIsRequest(r) && !messageIsResponse(r)) {
+    if (
+#ifdef MODE_SHARED_NODE
+        !isSharedNodeLocalVirtual &&
+#endif
+        mp.from != 0 && !messageIsRequest(r) && !messageIsResponse(r)) {
         if (!checkPassKey(r)) {
             LOG_WARN("Admin message without session_key!");
             myReply = allocErrorResponse(meshtastic_Routing_Error_ADMIN_BAD_SESSION_KEY, &mp);
@@ -146,11 +174,24 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
      */
     case meshtastic_AdminMessage_get_owner_request_tag:
         LOG_DEBUG("Client got owner");
+#ifdef MODE_SHARED_NODE
+        if (isSharedNodeLocalVirtual) {
+            handleGetVirtualOwner(mp, sharedNodeContext.virtualNodeId);
+            break;
+        }
+#endif
         handleGetOwner(mp);
         break;
 
     case meshtastic_AdminMessage_get_config_request_tag:
         LOG_DEBUG("Client got config");
+#ifdef MODE_SHARED_NODE
+        if (isSharedNodeLocalVirtual && r->get_config_request == meshtastic_AdminMessage_ConfigType_SECURITY_CONFIG) {
+            handleGetVirtualSecurityConfig(mp, sharedNodeContext.virtualNodeId,
+                                           sharedNodeContext.role == SharedNode::Role::ADMIN);
+            break;
+        }
+#endif
         handleGetConfig(mp, r->get_config_request);
         break;
 
@@ -196,11 +237,43 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
                 break;
             }
         }
+#ifdef MODE_SHARED_NODE
+        if (isSharedNodeLocalVirtual) {
+            if (!SharedNode::AdminPolicy::updateOwner(sharedNodeContext.virtualNodeId, r->set_owner)) {
+                virtualNodeManager.sendNotificationToVirtualNode(
+                    sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                    SharedNode::AdminPolicy::failureMessage(SharedNode::AdminPolicy::FailureReason::PROFILE_UNAVAILABLE));
+                myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
+            }
+            break;
+        }
+#endif
         handleSetOwner(r->set_owner);
         break;
 
     case meshtastic_AdminMessage_set_config_tag: {
         LOG_DEBUG("Client set config");
+
+#ifdef MODE_SHARED_NODE
+        if (isSharedNodeLocalVirtual && r->set_config.which_payload_variant == meshtastic_Config_security_tag) {
+            bool requiresReboot = false;
+            bool managedModeCleared = false;
+            if (!SharedNode::AdminPolicy::applySecurityConfig(sharedNodeContext, r->set_config, requiresReboot, managedModeCleared)) {
+                virtualNodeManager.sendNotificationToVirtualNode(
+                    sharedNodeContext.virtualNodeId, meshtastic_LogRecord_Level_WARNING, mp.id,
+                    SharedNode::AdminPolicy::failureMessage(SharedNode::AdminPolicy::FailureReason::IDENTITY_UNAVAILABLE));
+                myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &mp);
+            } else if (sharedNodeContext.role == SharedNode::Role::ADMIN) {
+                if (managedModeCleared) {
+                    const char *warning = "You must provide at least one admin public key to enable managed mode";
+                    LOG_WARN(warning);
+                    sendWarning(warning);
+                }
+                saveChanges(SEGMENT_CONFIG, requiresReboot);
+            }
+            break;
+        }
+#endif
 
         // Non-LoRa configs need no further validation.
         if (r->set_config.which_payload_variant != meshtastic_Config_lora_tag) {
@@ -330,6 +403,11 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         break;
     }
     case meshtastic_AdminMessage_factory_reset_device_tag: {
+#ifdef MODE_SHARED_NODE
+        // Factory reset must drop the stored admin/guest identities as well as
+        // the BLE bonds, otherwise old peers could reclaim stale slots.
+        SharedNode::pairingPolicy.clearAllKnownClients();
+#endif
         disableBluetooth();
         LOG_INFO("Initiate full factory reset");
         nodeDB->factoryReset(true);
@@ -563,23 +641,37 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         break;
     }
 
-    // Allow any observers (e.g. the UI) to handle/respond
-    AdminMessageHandleResult observerResult = AdminMessageHandleResult::NOT_HANDLED;
-    meshtastic_AdminMessage observerResponse = meshtastic_AdminMessage_init_default;
-    AdminModule_ObserverData observerData = {
-        .request = r,
-        .response = &observerResponse,
-        .result = &observerResult,
-    };
+    // Allow any observers (e.g. the UI) to handle/respond. Scoped virtual
+    // owner/security operations are complete here and should not leak into
+    // physical-node observers.
+    bool skipObservers = false;
+#ifdef MODE_SHARED_NODE
+    skipObservers = isSharedNodeLocalVirtual &&
+                    (r->which_payload_variant == meshtastic_AdminMessage_get_owner_request_tag ||
+                     r->which_payload_variant == meshtastic_AdminMessage_set_owner_tag ||
+                     (r->which_payload_variant == meshtastic_AdminMessage_get_config_request_tag &&
+                      r->get_config_request == meshtastic_AdminMessage_ConfigType_SECURITY_CONFIG) ||
+                     (r->which_payload_variant == meshtastic_AdminMessage_set_config_tag &&
+                      r->set_config.which_payload_variant == meshtastic_Config_security_tag));
+#endif
+    if (!skipObservers) {
+        AdminMessageHandleResult observerResult = AdminMessageHandleResult::NOT_HANDLED;
+        meshtastic_AdminMessage observerResponse = meshtastic_AdminMessage_init_default;
+        AdminModule_ObserverData observerData = {
+            .request = r,
+            .response = &observerResponse,
+            .result = &observerResult,
+        };
 
-    notifyObservers(&observerData);
+        notifyObservers(&observerData);
 
-    if (observerResult == AdminMessageHandleResult::HANDLED_WITH_RESPONSE) {
-        setPassKey(&observerResponse);
-        myReply = allocDataProtobuf(observerResponse);
-        LOG_DEBUG("Observer responded to admin message");
-    } else if (observerResult == AdminMessageHandleResult::HANDLED) {
-        LOG_DEBUG("Observer handled admin message");
+        if (observerResult == AdminMessageHandleResult::HANDLED_WITH_RESPONSE) {
+            setPassKey(&observerResponse);
+            myReply = allocDataProtobuf(observerResponse);
+            LOG_DEBUG("Observer responded to admin message");
+        } else if (observerResult == AdminMessageHandleResult::HANDLED) {
+            LOG_DEBUG("Observer handled admin message");
+        }
     }
 
     // If asked for a response and it is not yet set, generate an 'ACK' response
@@ -884,6 +976,14 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         LOG_INFO("Set config: Bluetooth");
         config.has_bluetooth = true;
         config.bluetooth = c.payload_variant.bluetooth;
+#ifdef MODE_SHARED_NODE
+        // Shared-node auth is built on pairing callbacks. Keep random PIN
+        // enabled even if a remote admin tries to push another BT mode.
+        if (config.bluetooth.mode != meshtastic_Config_BluetoothConfig_PairingMode_RANDOM_PIN) {
+            LOG_WARN("Shared-node requires random Bluetooth pairing mode; keeping random mode");
+            config.bluetooth.mode = meshtastic_Config_BluetoothConfig_PairingMode_RANDOM_PIN;
+        }
+#endif
         break;
     case meshtastic_Config_security_tag:
         LOG_INFO("Set config: Security");
@@ -1057,6 +1157,53 @@ void AdminModule::handleSetChannel(const meshtastic_Channel &cc)
 /**
  * Getters
  */
+
+#ifdef MODE_SHARED_NODE
+void AdminModule::handleGetVirtualOwner(const meshtastic_MeshPacket &req, NodeNum virtualNodeId)
+{
+    if (!req.decoded.want_response) {
+        return;
+    }
+
+    meshtastic_AdminMessage res = meshtastic_AdminMessage_init_default;
+    if (!SharedNode::AdminPolicy::buildOwner(virtualNodeId, res.get_owner_response)) {
+        myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &req);
+        return;
+    }
+
+    res.which_payload_variant = meshtastic_AdminMessage_get_owner_response_tag;
+    setPassKey(&res);
+    myReply = allocDataProtobuf(res);
+    if (req.pki_encrypted) {
+        myReply->pki_encrypted = true;
+    }
+}
+
+void AdminModule::handleGetVirtualSecurityConfig(const meshtastic_MeshPacket &req, NodeNum virtualNodeId, bool includeAdminKeys)
+{
+    if (!req.decoded.want_response) {
+        return;
+    }
+
+    meshtastic_AdminMessage res = meshtastic_AdminMessage_init_default;
+    res.get_config_response.which_payload_variant = meshtastic_Config_security_tag;
+    SharedNode::AdminPolicy::Context context;
+    context.isLocalVirtual = true;
+    context.role = includeAdminKeys ? SharedNode::Role::ADMIN : SharedNode::Role::GUEST;
+    context.virtualNodeId = virtualNodeId;
+    if (!SharedNode::AdminPolicy::buildSecurityConfig(context, res.get_config_response.payload_variant.security)) {
+        myReply = allocErrorResponse(meshtastic_Routing_Error_BAD_REQUEST, &req);
+        return;
+    }
+
+    res.which_payload_variant = meshtastic_AdminMessage_get_config_response_tag;
+    setPassKey(&res);
+    myReply = allocDataProtobuf(res);
+    if (req.pki_encrypted) {
+        myReply->pki_encrypted = true;
+    }
+}
+#endif
 
 void AdminModule::handleGetOwner(const meshtastic_MeshPacket &req)
 {

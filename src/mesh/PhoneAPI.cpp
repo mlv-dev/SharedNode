@@ -15,6 +15,10 @@
 #include "Router.h"
 #include "SPILock.h"
 #include "TypeConversions.h"
+#ifdef MODE_SHARED_NODE
+#include "mesh/sharedNode/VirtualNodeManager.h"
+#include "mesh/sharedNode/PairingPolicy.h"
+#endif
 #include "concurrency/LockGuard.h"
 #include "main.h"
 #include "xmodem.h"
@@ -35,6 +39,10 @@
 // Flag to indicate a heartbeat was received and we should send queue status
 bool heartbeatReceived = false;
 
+#ifdef MODE_SHARED_NODE
+using SharedNode::Role;
+#endif
+
 PhoneAPI::PhoneAPI()
 {
     lastContactMsec = millis();
@@ -50,6 +58,28 @@ void PhoneAPI::handleStartConfig()
 {
     // Must be before setting state (because state is how we know !connected)
     if (!isConnected()) {
+#ifdef MODE_SHARED_NODE
+        VirtualNodeManager::SessionStartResult sessionStartResult = VirtualNodeManager::SessionStartResult::UNKNOWN_ROLE;
+        // Transport layer has already chosen the slot via SharedNodePairingPolicy.
+        // Now we just need to register the session in VirtualNodeManager.
+        if (isAdmin()) {
+            // Admin role: already authenticated via BLE pairing
+            sessionStartResult = virtualNodeManager.connectAsAdmin(this);
+        } else if (isGuest()) {
+            // Guest role: already authenticated by transport-level pairing
+            sessionStartResult = virtualNodeManager.connectAsGuest(this);
+        }
+
+        if (sessionStartResult != VirtualNodeManager::SessionStartResult::OK) {
+            LOG_WARN("Shared-node client rejected while starting config: %u", static_cast<unsigned>(sessionStartResult));
+            // The app has not reached steady-state yet, so queue a local
+            // notification and let the transport close only after it is read.
+            sendNotificationAndClose(meshtastic_LogRecord_Level_ERROR, 0,
+                                     virtualNodeManager.getSessionStartMessage(sessionStartResult));
+            return;
+        }
+#endif
+
         onConnectionChanged(true);
         observe(&service->fromNumChanged);
 #ifdef FSCom
@@ -87,6 +117,10 @@ void PhoneAPI::handleStartConfig()
 void PhoneAPI::close()
 {
     LOG_DEBUG("PhoneAPI::close()");
+#ifdef MODE_SHARED_NODE
+    virtualNodeManager.disconnect(this);
+#endif
+
     if (service->api_state == service->STATE_BLE && api_type == TYPE_BLE)
         service->api_state = service->STATE_DISCONNECTED;
     else if (service->api_state == service->STATE_WIFI && api_type == TYPE_WIFI)
@@ -114,6 +148,12 @@ void PhoneAPI::close()
         onConnectionChanged(false);
         fromRadioScratch = {};
         toRadioScratch = {};
+#ifdef MODE_SHARED_NODE
+        hasVirtualPacketForPhone = false;
+        virtualPacketForPhone = meshtastic_MeshPacket_init_zero;
+#endif
+        closeAfterClientNotification = false;
+        closeAfterFromRadioRead = false;
         // Clear cached node info under lock because NimBLE callbacks can still be draining it.
         {
             concurrency::LockGuard guard(&nodeInfoMutex);
@@ -165,6 +205,15 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
             break;
         case meshtastic_ToRadio_disconnect_tag:
             LOG_INFO("Disconnect from phone");
+#ifdef MODE_SHARED_NODE
+            if (sharedNodeSlot != SharedNode::INVALID_SLOT) {
+                // This protobuf is the app-level "I am done with this device"
+                // signal. Treat it as an explicit slot release, unlike a plain
+                // BLE disconnect where the same phone may reconnect later.
+                SharedNode::pairingPolicy.disconnectSlot(sharedNodeSlot);
+                sharedNodeSlot = SharedNode::INVALID_SLOT;
+            }
+#endif
             close();
             break;
         case meshtastic_ToRadio_xmodemPacket_tag:
@@ -255,6 +304,15 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         strncpy(myNodeInfo.pio_env, optstr(APP_ENV), sizeof(myNodeInfo.pio_env));
         myNodeInfo.nodedb_count = static_cast<uint16_t>(nodeDB->getNumMeshNodes());
         fromRadioScratch.my_info = myNodeInfo;
+#ifdef MODE_SHARED_NODE
+        {
+            const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+            const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+            if (virtualNodeId != 0 && virtualNodeId != localNodeNum) {
+                fromRadioScratch.my_info.my_node_num = virtualNodeId;
+            }
+        }
+#endif
         state = STATE_SEND_UIDATA;
 
         service->refreshLocalMeshNode(); // Update my NodeInfo because the client will be asking for it soon.
@@ -269,6 +327,29 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
 
     case STATE_SEND_OWN_NODEINFO: {
         LOG_DEBUG("Send My NodeInfo");
+#ifdef MODE_SHARED_NODE
+        const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+        const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+        if (virtualNodeId != 0 && virtualNodeId != localNodeNum) {
+            meshtastic_NodeInfo info = meshtastic_NodeInfo_init_zero;
+            info.num = virtualNodeId;
+            info.has_user = SharedNode::pairingPolicy.buildVirtualUser(virtualNodeId, info.user);
+            info.has_hops_away = false;
+            info.is_favorite = true;
+            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_node_info_tag;
+            fromRadioScratch.node_info = info;
+            if (readIndex == 0) {
+                readIndex = 1;
+            }
+            if (config_nonce == SPECIAL_NONCE_ONLY_NODES) {
+                state = STATE_SEND_OTHER_NODEINFOS;
+                onNowHasData(0);
+            } else {
+                state = STATE_SEND_METADATA;
+            }
+            break;
+        }
+#endif
         auto us = nodeDB->readNextMeshNode(readIndex);
         if (us) {
             auto info = TypeConversions::ConvertToNodeInfo(us);
@@ -357,7 +438,27 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         case meshtastic_Config_security_tag:
             LOG_DEBUG("Send config: security");
             fromRadioScratch.config.which_payload_variant = meshtastic_Config_security_tag;
-            fromRadioScratch.config.payload_variant.security = config.security;
+#ifdef MODE_SHARED_NODE
+            {
+                const NodeNum virtualNodeId = virtualNodeManager.getVirtualNodeId(this);
+                const NodeNum localNodeNum = nodeDB ? nodeDB->getNodeNum() : 0;
+                const bool usesVirtualIdentity = virtualNodeId != 0 && virtualNodeId != localNodeNum;
+                if (usesVirtualIdentity) {
+                    const bool includeAdminKeys =
+                        SharedNode::pairingPolicy.roleForVirtualNodeId(virtualNodeId) == SharedNode::Role::ADMIN;
+                    if (!SharedNode::pairingPolicy.buildVirtualSecurityConfig(
+                            virtualNodeId, fromRadioScratch.config.payload_variant.security, includeAdminKeys)) {
+                        memset(&fromRadioScratch.config.payload_variant.security, 0,
+                               sizeof(fromRadioScratch.config.payload_variant.security));
+                    }
+                } else
+#endif
+                {
+                    fromRadioScratch.config.payload_variant.security = config.security;
+                }
+#ifdef MODE_SHARED_NODE
+            }
+#endif
             break;
         case meshtastic_Config_sessionkey_tag:
             LOG_DEBUG("Send config: sessionkey");
@@ -546,6 +647,25 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
         pauseBluetoothLogging = false;
         // Do we have a message from the mesh or packet from the local device?
         LOG_DEBUG("FromRadio=STATE_SEND_PACKETS");
+        if (clientNotification) {
+            // Local notifications are served before virtual or global queues so
+            // SharedNode guests still receive their own permission/limit errors.
+            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
+            fromRadioScratch.clientNotification = *clientNotification;
+            if (closeAfterClientNotification) {
+                closeAfterFromRadioRead = true;
+                closeAfterClientNotification = false;
+            }
+            releaseClientNotification();
+        } else
+#ifdef MODE_SHARED_NODE
+        if (hasVirtualPacketForPhone) {
+            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_packet_tag;
+            fromRadioScratch.packet = virtualPacketForPhone;
+            hasVirtualPacketForPhone = false;
+            virtualPacketForPhone = meshtastic_MeshPacket_init_zero;
+        } else
+#endif
         if (queueStatusPacketForPhone) {
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_queueStatus_tag;
             fromRadioScratch.queueStatus = *queueStatusPacketForPhone;
@@ -558,10 +678,6 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
             fromRadioScratch.which_payload_variant = meshtastic_FromRadio_xmodemPacket_tag;
             fromRadioScratch.xmodemPacket = xmodemPacketForPhone;
             xmodemPacketForPhone = meshtastic_XModem_init_zero;
-        } else if (clientNotification) {
-            fromRadioScratch.which_payload_variant = meshtastic_FromRadio_clientNotification_tag;
-            fromRadioScratch.clientNotification = *clientNotification;
-            releaseClientNotification();
         } else if (packetForPhone) {
             printPacket("phone downloaded packet", packetForPhone);
 
@@ -707,6 +823,28 @@ bool PhoneAPI::available()
         prefetchNodeInfos();
         return true;
     case STATE_SEND_PACKETS: {
+        if (clientNotification) {
+            // Per-connection notifications bypass the guest filter below; the
+            // global MeshService notification queue remains skipped by guests.
+            return true;
+        }
+
+#ifdef MODE_SHARED_NODE
+        if (!hasVirtualPacketForPhone) {
+            hasVirtualPacketForPhone = virtualNodeManager.popLocalPacketForApi(this, virtualPacketForPhone);
+        }
+        if (hasVirtualPacketForPhone) {
+            return true;
+        }
+
+        // Guests should not see real packets from the device,
+        // but instead only see virtual packets that the virtual node manager creates for them.
+        // So if we're a guest, don't even check for real packets.
+        if (isGuest()) {
+            return false;
+        }
+#endif
+
         if (!queueStatusPacketForPhone)
             queueStatusPacketForPhone = service->getQueueStatusForPhone();
         if (!mqttClientProxyMessageForPhone)
@@ -748,13 +886,70 @@ bool PhoneAPI::available()
 
 void PhoneAPI::sendNotification(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message)
 {
+    // Queue locally instead of using MeshService's global phone queue. SharedNode
+    // errors must go back to the exact API connection that caused them.
     meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
-    cn->has_reply_id = true;
+    if (!cn) {
+        return;
+    }
+    cn->has_reply_id = replyId != 0;
     cn->reply_id = replyId;
-    cn->level = meshtastic_LogRecord_Level_WARNING;
+    cn->level = level;
     cn->time = getValidTime(RTCQualityFromNet);
-    strncpy(cn->message, message, sizeof(cn->message));
-    service->sendClientNotification(cn);
+    if (message) {
+        strncpy(cn->message, message, sizeof(cn->message) - 1);
+        cn->message[sizeof(cn->message) - 1] = '\0';
+    }
+    queueClientNotification(cn, false);
+}
+
+void PhoneAPI::sendNotificationAndClose(meshtastic_LogRecord_Level level, uint32_t replyId, const char *message)
+{
+    meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
+    if (!cn) {
+        // If the pool is exhausted there is no payload to deliver, so close the
+        // rejected connection immediately instead of leaving it half-open.
+        onCloseAfterNotificationDelivered();
+        return;
+    }
+    cn->has_reply_id = replyId != 0;
+    cn->reply_id = replyId;
+    cn->level = level;
+    cn->time = getValidTime(RTCQualityFromNet);
+    if (message) {
+        strncpy(cn->message, message, sizeof(cn->message) - 1);
+        cn->message[sizeof(cn->message) - 1] = '\0';
+    }
+    if (state == STATE_SEND_NOTHING) {
+        state = STATE_SEND_PACKETS;
+    }
+    queueClientNotification(cn, true);
+}
+
+void PhoneAPI::onFromRadioReadComplete()
+{
+    if (!closeAfterFromRadioRead) {
+        return;
+    }
+
+    // At this point getFromRadio() has encoded the final notification and the
+    // transport callback has handed the bytes to BLE/API, so it is safe to drop.
+    closeAfterFromRadioRead = false;
+    onCloseAfterNotificationDelivered();
+}
+
+void PhoneAPI::queueClientNotification(meshtastic_ClientNotification *notification, bool closeAfterDelivery)
+{
+    if (!notification) {
+        return;
+    }
+
+    releaseClientNotification();
+    clientNotification = notification;
+    closeAfterClientNotification = closeAfterDelivery;
+    // Wake only this transport; local notifications should not advertise data
+    // on other PhoneAPI instances.
+    onNowHasData(0);
 }
 
 bool PhoneAPI::wasSeenRecently(uint32_t id)
@@ -830,7 +1025,7 @@ bool PhoneAPI::handleToRadioPacket(meshtastic_MeshPacket &p)
     }
 
     lastPortNumToRadio[p.decoded.portnum] = millis();
-    service->handleToRadio(p);
+    service->handleToRadio(p, this);
     return true;
 }
 
